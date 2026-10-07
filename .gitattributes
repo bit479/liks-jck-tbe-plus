@@ -4,7 +4,11 @@
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 
-# 二进制
+# 二进制（必须显式声明，否则 git 可能按文本处理把安装包弄坏）
+*.exe binary
+*.dll binary
+*.msi binary
+*.zip binary
 *.png binary
 *.jpg binary
 *.ico binary

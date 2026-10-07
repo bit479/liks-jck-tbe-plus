@@ -21,14 +21,12 @@
    | **② 试运行（只看不点）** | 只扫描，列出哪些文章没点赞，**不点** |
    | **③ 开始点赞** | 正式执行 |
 
-**环境要求：只有一个——电脑上装真正的 Python 3.10+。**
-不用 pip、不用联网装依赖（详见下面「为什么零依赖」）。
+**什么都不用先装。** 电脑上没有 Python 也没关系——`启动.bat` 会用仓库里
+自带的官方安装包（`installer\python-3.13.16-amd64.exe`）**自动静默安装**，
+只装给当前用户、不需要管理员权限，装完直接启动程序。
 
-> **没装 Python 或装成了微软商店版？**
-> `启动.bat` 会直接告诉你，并给出官方下载地址。
-> 注意微软商店那个 Python 是跑不了脚本的，一定要从
-> [python.org](https://www.python.org/downloads/) 下载官方安装包，
-> 安装时勾选 **Add python.exe to PATH**。
+整个项目也**不需要任何第三方库**：不用 pip、不用联网、不会再有依赖问题。
+（详见下面「为什么零依赖」）
 
 > **为什么要点「① 准备」？**
 > TBe+ 没有网页版登录入口，新闻站还有 WAF 只放行客户端内部的请求，
@@ -154,13 +152,19 @@ python tests/test_websocket.py
 
 ## 常见问题
 
-**双击 `启动.bat` 提示"没有找到可用的 Python"**
+**双击 `启动.bat` 提示"没能准备好 Python"**
 
-电脑上没装 Python，或者装的是微软商店版。请到
-[python.org](https://www.python.org/downloads/) 下载官方安装包，
-安装时勾选 **Add python.exe to PATH**。
-（老版本会报 `依赖安装失败，请检查网络后重试`，那是把
-"找不到 Python"误报成了网络问题，现在已修好。）
+正常情况下程序会自动装好 Python，出现这个提示说明自动安装也没成功，
+常见原因两种：
+
+1. 复制/下载的时候漏了 `installer` 目录，或者安装包不完整；
+2. 安装被公司的系统策略或杀毒软件拦了。
+
+可以先手动装一次（[python.org](https://www.python.org/downloads/)，
+记得勾选 **Add python.exe to PATH**），装完再双击 `启动.bat`。
+
+> 老版本会报 `依赖安装失败，请检查网络后重试`——那是把"找不到 Python"
+> 误报成了网络问题，现已修好。
 
 **提示"文章页显示登录超时"**
 
@@ -194,7 +198,10 @@ python tests/test_websocket.py
 liks-jck-tbe-plus/
 ├── 启动.bat              双击启动图形界面
 ├── 命令行.bat            打开命令行
-├── _python.bat           查找可用的 Python（启动脚本共用）
+├── _python.bat           查找 Python，找不到就用自带安装包自动安装
+├── installer/
+│   ├── python-3.13.16-amd64.exe   Python 官方安装包
+│   └── README.md                  版本 / SHA256 / 签名 / 安装参数
 ├── app.py                图形界面入口
 ├── cli.py                命令行入口
 ├── requirements.txt      说明"无第三方依赖"

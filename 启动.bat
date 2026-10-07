@@ -23,23 +23,22 @@ exit /b 0
 :no_python
 echo.
 echo   ================================================================
-echo    [错误] 这台电脑上没有找到可用的 Python
+echo    [错误] 没能准备好 Python
 echo   ================================================================
 echo.
-echo    本程序需要 Python 3.10 或更高版本，但不需要安装任何第三方包
-echo    （不需要 pip、不需要联网装依赖）。
+echo    正常情况下，本程序会自动用仓库里自带的官方安装包
+echo    （installer\python-*-amd64.exe）静默装好 Python，
+echo    不需要你手动操作。现在这一步没有成功，可能是：
 echo.
-echo    请到下面地址下载安装：
+echo      1) 仓库里的 installer 目录被删掉了，或者安装包不完整；
+echo      2) 安装被公司的系统策略 / 杀毒软件拦截了。
+echo.
+echo    你可以手动装一次，装完再双击本文件即可：
 echo        https://www.python.org/downloads/
+echo    安装时请务必勾选安装界面最下面的 [x] Add python.exe to PATH。
 echo.
-echo    安装时请务必勾选安装界面最下面的：
-echo        [x] Add python.exe to PATH
-echo.
-echo    装完之后重新双击本文件即可。
-echo.
-echo    注意：如果你以前"装过"Python 却还是看到这个提示，多半是装成了
-echo    微软商店版（Microsoft Store），那个版本不能直接跑脚本，
-echo    请从上面网址下载官方安装包重新安装一次。
+echo    注意：微软商店版（Microsoft Store）的 Python 跑不了脚本，
+echo    一定要用上面网址的官方安装包。
 echo.
 choice /c YN /n /m "  现在打开 Python 官方下载页吗？(Y/N) "
 if errorlevel 2 goto :skip_download
