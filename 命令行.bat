@@ -7,6 +7,9 @@ title TBe+ 新闻资讯自动点赞 - 命令行
 set "PY="
 if exist "%~dp0.venv\Scripts\python.exe" set "PY=%~dp0.venv\Scripts\python.exe"
 if not defined PY (
+  if exist "%~dp0..\.venv\Scripts\python.exe" set "PY=%~dp0..\.venv\Scripts\python.exe"
+)
+if not defined PY (
   where py >nul 2>nul && set "PY=py -3"
 )
 if not defined PY (
