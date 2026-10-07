@@ -17,12 +17,13 @@ CONFIG_FILE = APP_DIR / "config.json"
 
 DEFAULTS: Dict[str, Any] = {
     # ---------------- 客户端 ----------------
-    # TBe+ 桌面端可能装在下面任意一个位置，找到哪个用哪个
+    # TBe+ 桌面端的位置。这里只是一些"常见位置"的提示，
+    # 找不到时程序会自动查找（进程 / 快捷方式 / 注册表 / 常见目录），
+    # 实在找不到会弹窗让你手动指定，并把你选的路径记到这里。
     "client_exe_candidates": [
         r"C:\Program Files (x86)\tbea\2305251534\TBe.exe",
         r"C:\Program Files (x86)\tbea\TBe.exe",
         r"C:\Program Files\tbea\TBe.exe",
-        r"E:\Program Files (x86)\tbea\2305251534\TBe.exe",
     ],
     "debug_port": 9222,
     "restart_wait_seconds": 90,

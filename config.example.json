@@ -1,6 +1,7 @@
 {
   "_说明": "把这个文件复制成 config.json 就能覆盖默认配置；config.json 不会被提交到 git。",
 
+  "_client_exe_candidates说明": "这些只是常见位置。找不到时程序会自动查（进程/快捷方式/注册表/常见目录），再找不到会弹窗让你手动选，选完自动写回这里。通常不用你手填。",
   "client_exe_candidates": [
     "C:\\Program Files (x86)\\tbea\\2305251534\\TBe.exe",
     "C:\\Program Files (x86)\\tbea\\TBe.exe"

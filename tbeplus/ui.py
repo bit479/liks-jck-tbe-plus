@@ -6,7 +6,10 @@ import asyncio
 import os
 import queue
 import threading
-from tkinter import BOTH, END, LEFT, X, BooleanVar, IntVar, StringVar, Tk, messagebox
+from pathlib import Path
+from tkinter import (
+    BOTH, END, LEFT, X, BooleanVar, IntVar, StringVar, Tk, filedialog, messagebox,
+)
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
@@ -190,14 +193,54 @@ class App:
         self._start("准备：重启并接管 TBe+", self._attach_job)
 
     async def _attach_job(self) -> None:
-        ok = client_mod.attach(
-            self.cfg.client_exe_candidates,
-            self.cfg.debug_port,
-            restart=True,
-            timeout=self.cfg.restart_wait_seconds,
-            log=self.log,
+        if client_mod.is_attached(self.cfg.debug_port):
+            self.log(f"客户端已经处于可接管状态（端口 {self.cfg.debug_port}）")
+            self.log("准备完成，可以点「② 试运行」或「③ 开始点赞」了。")
+            return
+
+        exe = client_mod.resolve_client_exe(self.cfg.client_exe_candidates, self.log)
+        if exe is None:
+            self.log("")
+            self.log("没能自动找到 TBe.exe，请在接下来弹出的窗口里手动选一下。")
+            self.log("一般它在 TBe+ 的安装目录里（文件夹名可能带一串数字）。")
+            chosen = self._ask_client_exe()
+            if not chosen:
+                self.log("没有选择 TBe.exe，已取消。")
+                self.log("准备失败。")
+                return
+            exe = Path(chosen)
+            if client_mod.save_client_exe(exe, self.cfg.client_exe_candidates):
+                self.log(f"已经记到 config.json，下次会自动用它：{exe}")
+            self.cfg.client_exe_candidates = [str(exe)] + list(
+                self.cfg.client_exe_candidates
+            )
+
+        ok = client_mod.restart_client(
+            exe, self.cfg.debug_port, self.cfg.restart_wait_seconds, self.log
         )
         self.log("准备完成，可以点「② 试运行」或「③ 开始点赞」了。" if ok else "准备失败。")
+
+    def _ask_client_exe(self) -> str:
+        """弹文件选择框。tkinter 必须在主线程调用，所以用 after + Event 转过去。"""
+        result: dict = {}
+        done = threading.Event()
+
+        def ask() -> None:
+            try:
+                result["path"] = filedialog.askopenfilename(
+                    title="请选择 TBe.exe（在 TBe+ 的安装目录里）",
+                    filetypes=[
+                        ("TBe 主程序", "TBe.exe"),
+                        ("可执行文件", "*.exe"),
+                        ("所有文件", "*.*"),
+                    ],
+                )
+            finally:
+                done.set()
+
+        self.root.after(0, ask)
+        done.wait(timeout=600)
+        return result.get("path") or ""
 
     def _on_dry_run(self) -> None:
         self._start("试运行（只看不点）", lambda: self._run_job(True))

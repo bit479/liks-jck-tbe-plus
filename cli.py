@@ -32,6 +32,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--check", action="store_true", help="只检查客户端接管状态")
     parser.add_argument("--attach", action="store_true", help="带调试端口重启并接管客户端")
+    parser.add_argument(
+        "--client-exe", metavar="路径", help="手动指定 TBe.exe（会记进 config.json）"
+    )
     parser.add_argument("--list", action="store_true", help="只列出各板块篇数")
     parser.add_argument("--dry-run", action="store_true", help="只判断不点赞")
     parser.add_argument("--max", type=int, default=0, help="每个板块最多处理几篇（0=全部）")
@@ -56,16 +59,31 @@ async def main() -> int:
                 log(f"  {kind:9} {title[:60]}")
             return 0
         log("没有调试接口。先跑：python cli.py --attach")
+        exe = client_mod.resolve_client_exe(cfg.client_exe_candidates, lambda _: None)
+        log(f"TBe.exe：{exe}" if exe else "TBe.exe：没找到（可用 --client-exe 手动指定）")
         return 1
 
+    if args.client_exe:
+        exe = Path(args.client_exe)
+        if not exe.is_file():
+            log(f"指定的文件不存在：{exe}")
+            return 1
+        if client_mod.save_client_exe(exe, cfg.client_exe_candidates):
+            log(f"已记到 config.json：{exe}")
+        cfg.client_exe_candidates = [str(exe)] + list(cfg.client_exe_candidates)
+
     if args.attach:
-        ok = client_mod.attach(
-            cfg.client_exe_candidates,
-            cfg.debug_port,
-            restart=True,
-            timeout=cfg.restart_wait_seconds,
-            log=log,
-        )
+        if client_mod.is_attached(cfg.debug_port):
+            log(f"已经处于可接管状态（端口 {cfg.debug_port}）")
+            return 0
+        exe = client_mod.resolve_client_exe(cfg.client_exe_candidates, log)
+        if exe is None:
+            log("")
+            log("自动没找到 TBe.exe。手动指定一次即可，例如：")
+            log('  python cli.py --client-exe "D:\\...\\tbea\\2305251534\\TBe.exe"')
+            log("指定过的路径会记进 config.json，以后不用再填。")
+            return 2
+        ok = client_mod.restart_client(exe, cfg.debug_port, cfg.restart_wait_seconds, log)
         return 0 if ok else 2
 
     if not client_mod.is_attached(cfg.debug_port):
