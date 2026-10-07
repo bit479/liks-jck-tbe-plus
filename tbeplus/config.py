@@ -48,6 +48,22 @@ DEFAULTS: Dict[str, Any] = {
     "praise_selector": ".oper-area .praise-num",
     "praise_active_selector": ".oper-area .praise-active",
     "article_title_selector": ".article-item .article-title",
+    # 门户卡片里的文章标题（用来做登录预热，点它打开的文章会带 SSO 票据）
+    "portal_article_selector": ".article-title",
+
+    # ---------------- 登录预热 ----------------
+    # 文章页需要一个 token，而只有"从门户卡片点出来"的链接才带 SSO 票据。
+    # 所以开始干活前先从门户点开一篇文章，让新闻模块完成一次登录；
+    # 之后所有直连的文章地址就都正常了。
+    "login_warmup": True,
+    "login_warmup_timeout": 40.0,
+
+    # ---------------- 列表翻到底 ----------------
+    # 频道列表页是无限滚动的（实测一个频道 70 篇，首屏只有 10 篇），
+    # 所以要一直滚到底把所有文章都加载出来再处理。
+    "list_scroll_rounds": 60,
+    "list_scroll_stable": 3,
+    "list_load_timeout": 60.0,
 
     # ---------------- 节奏（秒） ----------------
     "page_timeout": 30.0,
@@ -77,6 +93,13 @@ class Config:
     praise_selector: str = ".oper-area .praise-num"
     praise_active_selector: str = ".oper-area .praise-active"
     article_title_selector: str = ".article-item .article-title"
+    portal_article_selector: str = ".article-title"
+
+    login_warmup: bool = True
+    login_warmup_timeout: float = 40.0
+    list_scroll_rounds: int = 60
+    list_scroll_stable: int = 3
+    list_load_timeout: float = 60.0
 
     page_timeout: float = 30.0
     wait_after_click: float = 4.0

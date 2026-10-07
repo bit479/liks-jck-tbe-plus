@@ -230,6 +230,74 @@ class LikeEngine:
     # ------------------------------------------------------------------
     # 门户卡片型板块
     # ------------------------------------------------------------------
+    async def warm_up_login(self) -> bool:
+        """从门户卡片点开一篇文章，让新闻模块完成一次 SSO 登录。
+
+        这是唯一可靠的登录入口：实测只有 **门户卡片** 生成的链接会带 SSO
+        票据（`ticket=APPURLWITHTICKET...`），频道列表页点出来的链接不带。
+        文章页拿到票据后就会换来登录态，之后所有直连的文章地址（包括
+        消息里那些不带票据的 URL）都能正常加载。
+
+        不做这一步，文章页会一直显示"文章获取错误：登录超时，请重新登录"。
+        """
+        if not self.cfg.login_warmup:
+            return True
+        portal = self.find_webview(self.cfg.portal_url_hint)
+        if portal is None:
+            self.log("  门户页不在，跳过登录预热")
+            return False
+
+        js = (
+            "(() => { const el = document.querySelector("
+            + json.dumps(self.cfg.portal_article_selector)
+            + "); if (!el) return { found: false };"
+            " el.scrollIntoView({ block: 'center' });"
+            " const r = el.getBoundingClientRect();"
+            " return { found: true, title: el.innerText.trim().slice(0, 30),"
+            " x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()"
+        )
+        before = {t.get("id") for t in self.targets()}
+        try:
+            async with CDPSession(
+                portal["webSocketDebuggerUrl"], timeout=self.cfg.page_timeout
+            ) as s:
+                await s.send("Runtime.enable")
+                info = await s.evaluate(js)
+                if not info or not info.get("found"):
+                    self.log("  门户上没找到可点的文章，跳过登录预热")
+                    return False
+                self.log(f"  点开门户文章做登录预热：{info.get('title', '')}")
+                await s.click_point(info["x"], info["y"])
+        except CDPError as exc:
+            self.log(f"  登录预热点击失败：{exc}")
+            return False
+
+        article = await self._wait_for_new_target(
+            before, self.cfg.article_webview_hint, timeout=self.cfg.login_warmup_timeout
+        )
+        if article is None:
+            self.log("  登录预热：没能打开文章窗口")
+            return False
+
+        url = article.get("url") or ""
+        if "id=" not in url:
+            return False
+        article_id = url.split("id=", 1)[1].split("&", 1)[0]
+        marker = f"{self.cfg.article_path}?id={article_id}"
+        try:
+            state = await self._wait_praise(marker, self.cfg.login_warmup_timeout)
+        finally:
+            await self._close_tab("id=" + article_id)
+
+        if state and state.get("found"):
+            self.log("  登录预热成功，新闻模块已登录")
+            return True
+        if self._looks_logged_out(state):
+            self.log("  登录预热失败：文章页仍提示需要重新登录")
+            return False
+        self.log("  登录预热没读到点赞区域，继续按原流程尝试")
+        return False
+
     async def open_channel(self, card_name: str, timeout: float = 20.0) -> Optional[Dict[str, Any]]:
         portal = self.find_webview(self.cfg.portal_url_hint)
         if portal is None:
@@ -264,26 +332,68 @@ class LikeEngine:
             return None
         return await self._wait_for_new_target(before, self.cfg.list_host, timeout)
 
-    async def collect_list_titles(self, timeout: float = 40.0) -> List[str]:
-        """列表页是 SPA，要等它渲染；期间目标可能重建，所以按 URL 反复找。"""
-        js = (
-            "(() => Array.from(document.querySelectorAll("
-            + json.dumps(self.cfg.article_title_selector)
-            + ")).map((el) => el.innerText.trim()).filter(Boolean))()"
+    async def collect_list_titles(self, timeout: Optional[float] = None) -> List[str]:
+        """把频道列表滚到底，返回全部文章标题。
+
+        列表页是 **无限滚动** 的：实测一个频道有 70 篇，而首屏只渲染 10 篇，
+        不往下滚就会漏掉绝大部分文章（这就是"漏识别"的原因）。
+        """
+        selector = json.dumps(self.cfg.article_title_selector)
+        titles_js = (
+            f"(() => Array.from(document.querySelectorAll({selector}))"
+            ".map((el) => el.innerText.trim()).filter(Boolean))()"
         )
+        # 把最后一个条目滚进视野，并顺手把内部滚动容器拉到底
+        scroll_js = (
+            "(() => {\n"
+            "  const items = document.querySelectorAll('.article-item');\n"
+            "  if (items.length) items[items.length - 1].scrollIntoView({ block: 'end' });\n"
+            "  for (const el of document.querySelectorAll('*')) {\n"
+            "    if (el.scrollHeight > el.clientHeight + 40 && el.clientHeight > 120 &&\n"
+            "        el.querySelector && el.querySelector('.article-item')) {\n"
+            "      el.scrollTop = el.scrollHeight;\n"
+            "    }\n"
+            "  }\n"
+            "  return document.querySelectorAll('.article-item').length;\n"
+            "})()"
+        )
+
+        timeout = timeout or self.cfg.list_load_timeout
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
-        while loop.time() < deadline:
+        titles: List[str] = []
+        last = -1
+        stable = 0
+
+        while loop.time() < deadline and not self._stop():
             target = self.find_webview(self.cfg.list_host)
-            if target is not None:
-                try:
-                    titles = await self._eval(target, js)
-                    if titles:
-                        return titles
-                except CDPError:
-                    pass
+            if target is None:
+                await asyncio.sleep(2.0)
+                continue
+            try:
+                titles = await self._eval(target, titles_js) or []
+                if titles:
+                    await self._eval(target, scroll_js)
+            except CDPError:
+                await asyncio.sleep(2.0)
+                continue
             await asyncio.sleep(2.0)
-        return []
+            try:
+                titles = await self._eval(target, titles_js) or titles
+            except CDPError:
+                pass
+            if not titles:
+                continue
+            if len(titles) == last:
+                stable += 1
+                if stable >= self.cfg.list_scroll_stable:
+                    break
+            else:
+                stable = 0
+                last = len(titles)
+            if last >= 5000:
+                break
+        return titles
 
     async def like_from_list(self, title: str) -> str:
         """从频道列表页点开文章并点赞。"""
@@ -311,24 +421,39 @@ class LikeEngine:
     # 会话型板块
     # ------------------------------------------------------------------
     async def switch_to_messages(self) -> bool:
+        """切到消息视图。切换是异步的，所以要点完再确认真的切过去了。"""
         main = self.find_target("dashboard.html")
         if main is None:
             return False
-        if "#/chat" in (main.get("url") or ""):
-            return True
         js = (
             "(() => { const el = document.querySelector('.navi-left a[title=\"消息\"]')"
             " || document.querySelector('a[title=\"消息\"]');"
             " if (!el) return false; el.click(); return true; })()"
         )
+        # 有些状态下会话列表已经在 DOM 里但视图没显示，所以按可见性判断
+        visible_js = (
+            "(() => { const el = document.querySelector('.session.layout-im');"
+            " if (!el) return false; const r = el.getBoundingClientRect();"
+            " return r.height > 200 && r.top > -20 && r.left >= 0; })()"
+        )
+        for _ in range(3):
+            main = self.find_target("dashboard.html")
+            if main is None:
+                return False
+            try:
+                if await self._eval(main, visible_js):
+                    return True
+                await self._eval(main, js)
+            except CDPError:
+                pass
+            await asyncio.sleep(3)
         try:
-            ok = await self._eval(main, js)
+            return bool(await self._eval(main, visible_js))
         except CDPError:
             return False
-        await asyncio.sleep(3)
-        return bool(ok)
 
     async def open_session(self, name: str) -> bool:
+        """点开订阅号会话，并等它的消息渲染出来。"""
         main = self.find_target("dashboard.html")
         if main is None:
             return False
@@ -348,19 +473,36 @@ class LikeEngine:
             + json.dumps(name, ensure_ascii=False)
             + ")"
         )
-        try:
-            async with CDPSession(
-                main["webSocketDebuggerUrl"], timeout=self.cfg.page_timeout
-            ) as s:
-                await s.send("Runtime.enable")
-                info = await s.evaluate(js)
-                if not info or not info.get("found"):
-                    return False
-                await s.click_point(info["x"], info["y"])
-        except CDPError:
-            return False
-        await asyncio.sleep(6)
-        return True
+        for attempt in range(3):
+            main = self.find_target("dashboard.html")
+            if main is None:
+                return False
+            try:
+                async with CDPSession(
+                    main["webSocketDebuggerUrl"], timeout=self.cfg.page_timeout
+                ) as s:
+                    await s.send("Runtime.enable")
+                    info = await s.evaluate(js)
+                    if not info or not info.get("found"):
+                        await asyncio.sleep(2)
+                        continue
+                    await s.click_point(info["x"], info["y"])
+            except CDPError:
+                await asyncio.sleep(2)
+                continue
+            # 等消息渲染出来（这是判断"会话真的打开了"最可靠的信号）
+            for _ in range(12):
+                await asyncio.sleep(2)
+                try:
+                    n = await self._eval(
+                        main, "document.querySelectorAll('div.news-item.msg-item').length"
+                    )
+                except CDPError:
+                    n = 0
+                if n:
+                    return True
+            await asyncio.sleep(2)
+        return False
 
     async def collect_session_articles(self, timeout: float = 90.0) -> List[Dict[str, str]]:
         """滚动加载会话历史，从消息组件数据里抽出所有文章 {title, url}。
@@ -475,9 +617,54 @@ class LikeEngine:
         return await self._like_article_target(marker, max_wait)
 
     async def _like_article_target(
-        self, marker: str, max_wait: Optional[float] = None
+        self, marker: str, max_wait: Optional[float] = None, allow_rewarm: bool = True
     ) -> str:
         timeout = max_wait or self.cfg.page_timeout
+        state = await self._wait_praise(marker, timeout)
+        if state is None:
+            return "no-button"
+
+        if self._looks_logged_out(state):
+            # 登录态掉了就再走一次门户预热（只重试一次，避免死循环）
+            if allow_rewarm and await self.warm_up_login():
+                return await self._like_article_target(marker, max_wait, allow_rewarm=False)
+            return "need-login"
+
+        if state.get("liked"):
+            return "already-liked"
+        if self.dry_run:
+            return f"dry-run(count={state['count']})"
+
+        current = self.find_webview(marker)
+        if current is None:
+            return "no-button"
+        try:
+            async with CDPSession(current["webSocketDebuggerUrl"], timeout=timeout) as s:
+                await s.send("Runtime.enable")
+                try:
+                    await s.send("Page.bringToFront")
+                except CDPError:
+                    pass
+                await s.click_point(state["x"], state["y"])
+                await asyncio.sleep(self.cfg.wait_after_click)
+                after = await s.evaluate(self._read_praise_js())
+                if after and (
+                    after.get("liked") or after.get("count") != state["count"]
+                ):
+                    return f"liked({state['count']}->{after.get('count')})"
+                # 状态刷新有延迟，再确认一轮
+                await asyncio.sleep(self.cfg.confirm_wait)
+                again = await s.evaluate(self._read_praise_js())
+                if again and (
+                    again.get("liked") or again.get("count") != state["count"]
+                ):
+                    return f"liked({state['count']}->{again.get('count')})"
+                return "no-change"
+        except CDPError:
+            return "no-change"
+
+    async def _wait_praise(self, marker: str, timeout: float) -> Optional[Dict[str, Any]]:
+        """等文章页把点赞区域渲染出来，返回读到的状态（失败返回 None）。"""
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline and not self._stop():
@@ -494,32 +681,14 @@ class LikeEngine:
                         except CDPError:
                             pass
                         state = await s.evaluate(self._read_praise_js())
-                        if self._looks_logged_out(state):
-                            return "need-login"
                         if state and state.get("found"):
-                            if state["liked"]:
-                                return "already-liked"
-                            if self.dry_run:
-                                return f"dry-run(count={state['count']})"
-                            await s.click_point(state["x"], state["y"])
-                            await asyncio.sleep(self.cfg.wait_after_click)
-                            after = await s.evaluate(self._read_praise_js())
-                            if after and (
-                                after.get("liked") or after.get("count") != state["count"]
-                            ):
-                                return f"liked({state['count']}->{after.get('count')})"
-                            # 状态刷新有延迟，再确认一轮
-                            await asyncio.sleep(self.cfg.confirm_wait)
-                            again = await s.evaluate(self._read_praise_js())
-                            if again and (
-                                again.get("liked") or again.get("count") != state["count"]
-                            ):
-                                return f"liked({state['count']}->{again.get('count')})"
-                            return "no-change"
+                            return state
+                        if self._looks_logged_out(state):
+                            return state
                 except CDPError:
                     pass
             await asyncio.sleep(self.cfg.poll_interval)
-        return "no-button"
+        return None
 
     # ------------------------------------------------------------------
     # 总入口
@@ -561,16 +730,22 @@ class LikeEngine:
         self.log("")
         self.log("=" * 60)
         self.log(f"板块（会话）：{name}")
-        if not await self.switch_to_messages():
-            self.log("  切不到消息视图，跳过")
-            result.error = "switch-failed"
+        articles: List[Dict[str, str]] = []
+        for attempt in range(1, 4):
+            if not await self.switch_to_messages():
+                self.log(f"  第 {attempt} 次：切不到消息视图")
+            elif not await self.open_session(name):
+                self.log(f"  第 {attempt} 次：打不开会话")
+            else:
+                articles = await self.collect_session_articles()
+                if articles:
+                    break
+                self.log(f"  第 {attempt} 次：没取到文章，重试 …")
+            await asyncio.sleep(3)
+        if not articles:
+            self.log("  会话板块没取到文章，跳过")
+            result.error = "session-empty"
             return result
-        if not await self.open_session(name):
-            self.log("  打不开会话，跳过")
-            result.error = "session-not-found"
-            return result
-
-        articles = await self.collect_session_articles()
         self.log(f"  会话里共找到 {len(articles)} 篇（消息里直接带 URL，不用点卡片）")
         result.total = len(articles)
         if limit:
@@ -590,6 +765,11 @@ class LikeEngine:
         """跑完选定的板块。channels=None 表示三个板块全跑。"""
         results: List[SectionResult] = []
         selected = set(channels) if channels else None
+
+        if self.cfg.login_warmup:
+            self.log("=" * 60)
+            self.log("准备：登录预热（先从门户打开一篇文章，建立新闻模块登录态）")
+            await self.warm_up_login()
 
         for card in self.cfg.portal_cards:
             if self._stop():
