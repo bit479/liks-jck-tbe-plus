@@ -17,13 +17,76 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from .cdp import CDPSession, CDPError, list_targets
 from .config import Config
 
 LogFn = Callable[[str], None]
+
+# 这些状态说明"这一篇没处理成"，值得重试一次
+_RETRYABLE = {"no-button", "no-window", "click-failed", "no-list", "no-change"}
+
+
+# ---------------------------------------------------------------------------
+# 日期解析
+# ---------------------------------------------------------------------------
+# 缩略图地址里带着发布日期：.../public/data/26/09/30/xxxx.jpg  ->  2026-09-30
+_IMAGE_DATE_RE = re.compile(r"/data/(\d{2})/(\d{1,2})/(\d{1,2})/")
+# 列表里的日期文案：可能是 2026/09/30，也可能只有 09/30
+_FULL_DATE_RE = re.compile(r"(\d{4})[/\-年](\d{1,2})[/\-月](\d{1,2})")
+_SHORT_DATE_RE = re.compile(r"(\d{1,2})[/\-](\d{1,2})")
+
+
+def _safe_date(year: int, month: int, day: int) -> Optional[date]:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def parse_article_date(image: str = "", date_text: str = "") -> Optional[date]:
+    """从缩略图地址或列表里的日期文案推断文章发布日期。"""
+    match = _IMAGE_DATE_RE.search(image or "")
+    if match:
+        year, month, day = (int(x) for x in match.groups())
+        parsed = _safe_date(2000 + year, month, day)
+        if parsed is not None:
+            return parsed
+
+    text = (date_text or "").strip()
+    match = _FULL_DATE_RE.search(text)
+    if match:
+        parsed = _safe_date(*(int(x) for x in match.groups()))
+        if parsed is not None:
+            return parsed
+
+    match = _SHORT_DATE_RE.search(text)
+    if match:
+        month, day = (int(x) for x in match.groups())
+        today = date.today()
+        parsed = _safe_date(today.year, month, day)
+        if parsed is None:
+            return None
+        # 只有月日时，如果比今天晚了一个月以上，多半是去年的
+        if (parsed - today).days > 30:
+            parsed = _safe_date(today.year - 1, month, day) or parsed
+        return parsed
+    return None
+
+
+def parse_user_date(text: str) -> Optional[date]:
+    """解析用户输入的时间：支持 2026-09-01 / 2026/9/1 / 20260901 / 2026.9.1。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    match = re.match(r"^(\d{4})[-/.年]?(\d{1,2})[-/.月]?(\d{1,2})日?$", text)
+    if not match:
+        return None
+    return _safe_date(*(int(x) for x in match.groups()))
 
 
 @dataclass
@@ -183,7 +246,12 @@ class LikeEngine:
         return ("登录超时" in body) or ("重新登录" in body) or ("请先登录" in body)
 
     async def _close_tab(self, marker: str) -> bool:
-        """内容页是开在一个窗口里的标签页，关标签而不是关窗口。"""
+        """内容页是开在一个窗口里的标签页，关标签而不是关窗口。
+
+        只在"这个标签是文章页"时才关，绝不误伤频道列表页。
+        有的标签 title 属性是空的（页面还没加载完就关），
+        所以匹配不到具体文章时，退回关最后一个 **文章** 标签。
+        """
         host = next(
             (t for t in self.targets() if "browser.html" in (t.get("url") or "")), None
         )
@@ -193,15 +261,21 @@ class LikeEngine:
             r"""((marker) => {
               const bar = document.querySelector('.tab-bar');
               if (!bar) return false;
-              for (const tab of bar.querySelectorAll('.tab-header')) {
+              const tabs = Array.from(bar.querySelectorAll('.tab-header'));
+              const titleOf = (tab) => {
                 const span = tab.querySelector('span.title');
-                const title = span ? (span.getAttribute('title') || '') : '';
-                if (title.includes(marker)) {
-                  const closer = tab.querySelector('em.tab-close');
-                  if (closer) { closer.click(); return true; }
-                }
+                return span ? (span.getAttribute('title') || '') : '';
+              };
+              let target = tabs.find((tab) => titleOf(tab).includes(marker));
+              if (!target) {
+                // 只考虑文章页，避免把频道列表页关掉
+                const articles = tabs.filter((tab) => titleOf(tab).includes('pc/show'));
+                target = articles.length ? articles[articles.length - 1] : null;
               }
-              return false;
+              const closer = target && target.querySelector('em.tab-close');
+              if (!closer) return false;
+              closer.click();
+              return true;
             })("""
             + json.dumps(marker, ensure_ascii=False)
             + ")"
@@ -212,6 +286,39 @@ class LikeEngine:
                 return bool(await s.evaluate(js))
         except CDPError:
             return False
+
+    async def close_article_tabs(self) -> int:
+        """把文章窗口里遗留的文章标签页都关掉，避免干扰后续判断。
+
+        上一次运行如果被打断，会留下一些已经失效的文章页；它们和新的文章页
+        URL 相同，按 URL 查找时可能命中旧的，从而误判成"登录超时"。
+        这里只关 URL 里带 pc/show 的标签，不动用户自己开的东西。
+        """
+        host = next(
+            (t for t in self.targets() if "browser.html" in (t.get("url") or "")), None
+        )
+        if host is None:
+            return 0
+        js = (
+            "(() => { const bar = document.querySelector('.tab-bar');"
+            " if (!bar) return 0;"
+            " const tabs = Array.from(bar.querySelectorAll('.tab-header'));"
+            " let n = 0;"
+            " for (const tab of tabs) {"
+            "   const span = tab.querySelector('span.title');"
+            "   const t = span ? (span.getAttribute('title') || '') : '';"
+            "   if (!t.includes('pc/show')) continue;"
+            "   const c = tab.querySelector('em.tab-close');"
+            "   if (c) { try { c.click(); n++; } catch (e) {} }"
+            " }"
+            " return n; })()"
+        )
+        try:
+            async with CDPSession(host["webSocketDebuggerUrl"], timeout=20) as s:
+                await s.send("Runtime.enable")
+                return int(await s.evaluate(js) or 0)
+        except (CDPError, TypeError):
+            return 0
 
     async def _wait_for_new_target(
         self, existing_ids: set, pattern: str, timeout: float
@@ -285,7 +392,9 @@ class LikeEngine:
         article_id = url.split("id=", 1)[1].split("&", 1)[0]
         marker = f"{self.cfg.article_path}?id={article_id}"
         try:
-            state = await self._wait_praise(marker, self.cfg.login_warmup_timeout)
+            _, state = await self._wait_praise(
+                marker, self.cfg.login_warmup_timeout, target_id=article.get("id")
+            )
         finally:
             await self._close_tab("id=" + article_id)
 
@@ -332,16 +441,23 @@ class LikeEngine:
             return None
         return await self._wait_for_new_target(before, self.cfg.list_host, timeout)
 
-    async def collect_list_titles(self, timeout: Optional[float] = None) -> List[str]:
-        """把频道列表滚到底，返回全部文章标题。
+    async def collect_list_articles(self, timeout: Optional[float] = None) -> List[Dict[str, Any]]:
+        """把频道列表滚到底，返回全部文章（标题 + 发布日期）。
 
-        列表页是 **无限滚动** 的：实测一个频道有 70 篇，而首屏只渲染 10 篇，
-        不往下滚就会漏掉绝大部分文章（这就是"漏识别"的原因）。
+        列表页是 **无限滚动** 的：实测【新闻资讯】有 200 篇，而首屏只渲染
+        10 篇，不往下滚就会漏掉绝大部分文章。
         """
-        selector = json.dumps(self.cfg.article_title_selector)
-        titles_js = (
-            f"(() => Array.from(document.querySelectorAll({selector}))"
-            ".map((el) => el.innerText.trim()).filter(Boolean))()"
+        items_js = (
+            "(() => Array.from(document.querySelectorAll('.article-item')).map((item) => {\n"
+            "  const t = item.querySelector('.article-title');\n"
+            "  const intro = item.querySelector('.article-intro');\n"
+            "  const img = item.querySelector('.img-container');\n"
+            "  let dateText = '';\n"
+            "  if (intro) { const sp = intro.querySelectorAll('span');\n"
+            "    if (sp.length) dateText = (sp[sp.length - 1].innerText || '').trim(); }\n"
+            "  return { title: t ? (t.innerText || '').trim() : '', dateText: dateText,\n"
+            "           image: img ? (img.getAttribute('style') || '') : '' };\n"
+            "}).filter((x) => x.title))()"
         )
         # 把最后一个条目滚进视野，并顺手把内部滚动容器拉到底
         scroll_js = (
@@ -361,7 +477,7 @@ class LikeEngine:
         timeout = timeout or self.cfg.list_load_timeout
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
-        titles: List[str] = []
+        raw: List[Dict[str, Any]] = []
         last = -1
         stable = 0
 
@@ -371,29 +487,43 @@ class LikeEngine:
                 await asyncio.sleep(2.0)
                 continue
             try:
-                titles = await self._eval(target, titles_js) or []
-                if titles:
+                raw = await self._eval(target, items_js) or []
+                if raw:
                     await self._eval(target, scroll_js)
             except CDPError:
                 await asyncio.sleep(2.0)
                 continue
             await asyncio.sleep(2.0)
             try:
-                titles = await self._eval(target, titles_js) or titles
+                raw = await self._eval(target, items_js) or raw
             except CDPError:
                 pass
-            if not titles:
+            if not raw:
                 continue
-            if len(titles) == last:
+            if len(raw) == last:
                 stable += 1
                 if stable >= self.cfg.list_scroll_stable:
                     break
             else:
                 stable = 0
-                last = len(titles)
+                last = len(raw)
             if last >= 5000:
                 break
-        return titles
+
+        articles: List[Dict[str, Any]] = []
+        for item in raw:
+            articles.append(
+                {
+                    "title": item.get("title", ""),
+                    "date": parse_article_date(
+                        item.get("image", ""), item.get("dateText", "")
+                    ),
+                }
+            )
+        return articles
+
+    async def collect_list_titles(self, timeout: Optional[float] = None) -> List[str]:
+        return [a["title"] for a in await self.collect_list_articles(timeout)]
 
     async def like_from_list(self, title: str) -> str:
         """从频道列表页点开文章并点赞。"""
@@ -413,7 +543,7 @@ class LikeEngine:
         marker = self.cfg.article_path + "?id=" + url.split("id=", 1)[1].split("&", 1)[0]
         article_id = marker.split("id=", 1)[1]
         try:
-            return await self._like_article_target(marker)
+            return await self._like_article_target(marker, target_id=article.get("id"))
         finally:
             await self._close_tab("id=" + article_id)
 
@@ -522,9 +652,15 @@ class LikeEngine:
                 const vm = el.__vue__;
                 const msg = vm && vm.$props ? vm.$props.msg : (vm ? vm.msg : null);
                 const list = msg && msg.param ? msg.param.list : null;
+                const sendTime = msg && msg.sendTime ? msg.sendTime : '';
                 if (Array.isArray(list)) {
                   list.forEach((a) => {
-                    if (a && a.url) out.push({ title: a.title || a.text || '', url: a.url });
+                    if (a && a.url) out.push({
+                      title: a.title || a.text || '',
+                      url: a.url,
+                      image: a.thumbUrl || a.name || '',
+                      dateText: sendTime
+                    });
                   });
                 }
               });
@@ -533,7 +669,7 @@ class LikeEngine:
         )
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
-        found: Dict[str, str] = {}
+        found: Dict[str, Dict[str, Any]] = {}
         stable = 0
         while loop.time() < deadline and not self._stop():
             main = self.find_target("dashboard.html")
@@ -550,7 +686,13 @@ class LikeEngine:
             for item in items:
                 url = item.get("url")
                 if url and url not in found:
-                    found[url] = item.get("title") or ""
+                        found[url] = {
+                            "title": item.get("title") or "",
+                            "url": url,
+                            "date": parse_article_date(
+                                item.get("image", ""), item.get("dateText", "")
+                            ),
+                        }
             if len(found) > before:
                 stable = 0
             else:
@@ -558,7 +700,7 @@ class LikeEngine:
                 if stable >= 3:
                     break
             await asyncio.sleep(self.cfg.poll_interval)
-        return [{"title": t, "url": u} for u, t in found.items()]
+        return list(found.values())
 
     async def ensure_article_webview(self) -> Optional[Dict[str, Any]]:
         """找一个能随便导航的 webview 当"浏览器"用。
@@ -617,17 +759,23 @@ class LikeEngine:
         return await self._like_article_target(marker, max_wait)
 
     async def _like_article_target(
-        self, marker: str, max_wait: Optional[float] = None, allow_rewarm: bool = True
+        self,
+        marker: str,
+        max_wait: Optional[float] = None,
+        allow_rewarm: bool = True,
+        target_id: Optional[str] = None,
     ) -> str:
         timeout = max_wait or self.cfg.page_timeout
-        state = await self._wait_praise(marker, timeout)
+        found_id, state = await self._wait_praise(marker, timeout, target_id=target_id)
         if state is None:
             return "no-button"
 
         if self._looks_logged_out(state):
             # 登录态掉了就再走一次门户预热（只重试一次，避免死循环）
             if allow_rewarm and await self.warm_up_login():
-                return await self._like_article_target(marker, max_wait, allow_rewarm=False)
+                return await self._like_article_target(
+                    marker, max_wait, allow_rewarm=False, target_id=target_id
+                )
             return "need-login"
 
         if state.get("liked"):
@@ -635,7 +783,13 @@ class LikeEngine:
         if self.dry_run:
             return f"dry-run(count={state['count']})"
 
-        current = self.find_webview(marker)
+        current = None
+        if found_id:
+            current = next((t for t in self.targets() if t.get("id") == found_id), None)
+        if current is None and target_id:
+            current = next((t for t in self.targets() if t.get("id") == target_id), None)
+        if current is None:
+            current = self.find_webview(marker)
         if current is None:
             return "no-button"
         try:
@@ -663,13 +817,35 @@ class LikeEngine:
         except CDPError:
             return "no-change"
 
-    async def _wait_praise(self, marker: str, timeout: float) -> Optional[Dict[str, Any]]:
-        """等文章页把点赞区域渲染出来，返回读到的状态（失败返回 None）。"""
+    async def _wait_praise(
+        self, marker: str, timeout: float, target_id: Optional[str] = None
+    ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+        """等文章页把点赞区域渲染出来，返回 (目标id, 状态)。
+
+        实测同一篇文章会有好几个同名 webview：刚新建的那个可能是空的，
+        真正渲染好的是另一个，另外还可能有上次遗留的失效页面。
+        所以这里把候选全试一遍，谁先渲染出点赞区域就用谁。
+        """
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
+        logged_out_state: Optional[Dict[str, Any]] = None
+
         while loop.time() < deadline and not self._stop():
-            current = self.find_webview(marker)
-            if current is not None:
+            candidates: List[Dict[str, Any]] = []
+            if target_id:
+                preferred = next(
+                    (t for t in self.targets() if t.get("id") == target_id), None
+                )
+                if preferred is not None:
+                    candidates.append(preferred)
+            for t in self.targets():
+                if t.get("type") != "webview" or marker not in (t.get("url") or ""):
+                    continue
+                if any(c.get("id") == t.get("id") for c in candidates):
+                    continue
+                candidates.append(t)
+
+            for current in candidates:
                 try:
                     async with CDPSession(
                         current["webSocketDebuggerUrl"], timeout=timeout
@@ -681,18 +857,60 @@ class LikeEngine:
                         except CDPError:
                             pass
                         state = await s.evaluate(self._read_praise_js())
-                        if state and state.get("found"):
-                            return state
-                        if self._looks_logged_out(state):
-                            return state
                 except CDPError:
-                    pass
+                    continue
+                if state and state.get("found"):
+                    return current.get("id"), state
+                if self._looks_logged_out(state) and logged_out_state is None:
+                    logged_out_state = state
             await asyncio.sleep(self.cfg.poll_interval)
-        return None
+        # 所有候选都没渲染出点赞区域；如果期间看到过"登录超时"就报它
+        return None, logged_out_state
 
     # ------------------------------------------------------------------
     # 总入口
     # ------------------------------------------------------------------
+    def date_range(self):
+        """返回配置里的 (起, 止)，没配就是 None。"""
+        return (
+            parse_user_date(self.cfg.filter_since),
+            parse_user_date(self.cfg.filter_until),
+        )
+
+    def filter_by_date(self, articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """按配置的时间段筛掉不在范围内的文章。"""
+        since, until = self.date_range()
+        if since is None and until is None:
+            return articles
+
+        kept: List[Dict[str, Any]] = []
+        skipped = 0
+        unknown = 0
+        for item in articles:
+            day = item.get("date")
+            if day is None:
+                # 认不出日期的宁可留着，也不要漏掉
+                unknown += 1
+                kept.append(item)
+                continue
+            if since is not None and day < since:
+                skipped += 1
+                continue
+            if until is not None and day > until:
+                skipped += 1
+                continue
+            kept.append(item)
+
+        span = []
+        if since is not None:
+            span.append(f"{since:%Y-%m-%d} 起")
+        if until is not None:
+            span.append(f"{until:%Y-%m-%d} 止")
+        self.log(f"  时间段筛选：{'、'.join(span)} → 保留 {len(kept)} 篇，跳过 {skipped} 篇")
+        if unknown:
+            self.log(f"  （其中 {unknown} 篇日期没认出来，为保证不漏已照常处理）")
+        return kept
+
     async def run_section(self, card_name: str, limit: int = 0) -> SectionResult:
         result = SectionResult(name=card_name)
         self.log("")
@@ -705,19 +923,34 @@ class LikeEngine:
             return result
 
         await asyncio.sleep(7)
-        titles = await self.collect_list_titles()
-        self.log(f"  列表里共 {len(titles)} 篇")
-        result.total = len(titles)
+        articles = await self.collect_list_articles()
+        self.log(f"  列表里共 {len(articles)} 篇")
+        articles = self.filter_by_date(articles)
+        result.total = len(articles)
         if limit:
-            titles = titles[:limit]
+            articles = articles[:limit]
 
-        for i, title in enumerate(titles, 1):
+        for i, item in enumerate(articles, 1):
             if self._stop():
                 self.log("  已手动停止")
                 break
-            status = await self.like_from_list(title)
+            status = await self.like_from_list(item["title"])
+            if status in _RETRYABLE:
+                # 偶尔会遇到文章窗口开得慢 / 页面还没渲染好，重试一次
+                await asyncio.sleep(2)
+                if status == "no-list":
+                    # 频道列表页被关掉了，重新打开再试
+                    if await self.open_channel(card_name) is not None:
+                        await asyncio.sleep(7)
+                retry = await self.like_from_list(item["title"])
+                if retry not in _RETRYABLE:
+                    status = retry
+                else:
+                    status = f"{retry}(重试仍失败)"
             result.stats[status] = result.stats.get(status, 0) + 1
-            self.log(f"  [{i}/{len(titles)}] {status:<24} {title[:32]}")
+            day = item.get("date")
+            stamp = f"{day:%m-%d} " if day else "      "
+            self.log(f"  [{i}/{len(articles)}] {stamp}{status:<24} {item['title'][:30]}")
 
         current = self.find_webview(self.cfg.list_host)
         if current is not None:
@@ -747,6 +980,7 @@ class LikeEngine:
             result.error = "session-empty"
             return result
         self.log(f"  会话里共找到 {len(articles)} 篇（消息里直接带 URL，不用点卡片）")
+        articles = self.filter_by_date(articles)
         result.total = len(articles)
         if limit:
             articles = articles[:limit]
@@ -756,8 +990,14 @@ class LikeEngine:
                 self.log("  已手动停止")
                 break
             status = await self.process_article_url(item["url"])
+            if status in _RETRYABLE:
+                await asyncio.sleep(2)
+                retry = await self.process_article_url(item["url"])
+                status = retry if retry not in _RETRYABLE else f"{retry}(重试仍失败)"
             result.stats[status] = result.stats.get(status, 0) + 1
-            self.log(f"  [{i}/{len(articles)}] {status:<24} {item['title'][:32]}")
+            day = item.get("date")
+            stamp = f"{day:%m-%d} " if day else "      "
+            self.log(f"  [{i}/{len(articles)}] {stamp}{status:<24} {item['title'][:30]}")
         self.log(f"  小结：{_fmt(result.stats)}")
         return result
 
@@ -769,6 +1009,9 @@ class LikeEngine:
         if self.cfg.login_warmup:
             self.log("=" * 60)
             self.log("准备：登录预热（先从门户打开一篇文章，建立新闻模块登录态）")
+            closed = await self.close_article_tabs()
+            if closed:
+                self.log(f"  先清理了 {closed} 个上次遗留的文章标签页")
             await self.warm_up_login()
 
         for card in self.cfg.portal_cards:

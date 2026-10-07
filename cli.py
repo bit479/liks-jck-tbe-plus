@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tbeplus import client as client_mod  # noqa: E402
 from tbeplus.config import load_config  # noqa: E402
-from tbeplus.engine import LikeEngine, summarize  # noqa: E402
+from tbeplus.engine import LikeEngine, parse_user_date, summarize  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,6 +40,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max", type=int, default=0, help="每个板块最多处理几篇（0=全部）")
     parser.add_argument("--only", action="append", default=[], help="只跑指定板块（可重复）")
     parser.add_argument("--no-session", action="store_true", help="跳过会话型板块")
+    parser.add_argument(
+        "--since", metavar="YYYY-MM-DD", help="只处理这天及之后的新闻"
+    )
+    parser.add_argument(
+        "--until",
+        metavar="YYYY-MM-DD",
+        help="只处理这天及之前的新闻；不填表示一直到今天",
+    )
+    parser.add_argument(
+        "--last-days", type=int, metavar="N", help="只处理最近 N 天的新闻（等价于 --since）"
+    )
     return parser.parse_args()
 
 
@@ -48,6 +59,22 @@ async def main() -> int:
     cfg = load_config()
     if args.no_session:
         cfg.skip_session_by_default = True
+
+    # 时间段
+    since_text = args.since
+    if args.last_days is not None and not since_text:
+        from datetime import date, timedelta
+
+        since_text = (date.today() - timedelta(days=args.last_days)).isoformat()
+        print(f"按最近 {args.last_days} 天处理：{since_text} 起", flush=True)
+    for label, value in (("--since", since_text), ("--until", args.until)):
+        if value and parse_user_date(value) is None:
+            print(f"{label} 的日期格式不对：{value!r}，请用 YYYY-MM-DD", flush=True)
+            return 2
+    if since_text:
+        cfg.filter_since = since_text
+    if args.until:
+        cfg.filter_until = args.until
 
     def log(message: str) -> None:
         print(message, flush=True)
@@ -93,20 +120,27 @@ async def main() -> int:
     engine = LikeEngine(cfg, dry_run=args.dry_run, log=log)
 
     if args.list:
+        def describe(articles):
+            days = sorted(a["date"] for a in articles if a.get("date"))
+            kept = len(engine.filter_by_date(articles))
+            span = f"{days[0]} ~ {days[-1]}" if days else "日期未知"
+            tail = f"，时间段内 {kept} 篇" if (cfg.filter_since or cfg.filter_until) else ""
+            return f"{len(articles)} 篇（{span}{tail}）"
+
         for card in cfg.portal_cards:
             opened = await engine.open_channel(card)
             if opened is None:
                 log(f"{card}: 打开失败")
                 continue
             await asyncio.sleep(7)
-            titles = await engine.collect_list_titles()
-            log(f"{card}: {len(titles)} 篇")
+            articles = await engine.collect_list_articles()
+            log(f"{card}: {describe(articles)}")
         if cfg.session_channel and not cfg.skip_session_by_default:
             if await engine.switch_to_messages() and await engine.open_session(
                 cfg.session_channel
             ):
                 articles = await engine.collect_session_articles()
-                log(f"{cfg.session_channel}: {len(articles)} 篇")
+                log(f"{cfg.session_channel}: {describe(articles)}")
         return 0
 
     results = await engine.run(channels=args.only or None, limit=args.max)

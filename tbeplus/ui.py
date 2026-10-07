@@ -6,6 +6,7 @@ import asyncio
 import os
 import queue
 import threading
+from datetime import date, timedelta
 from pathlib import Path
 from tkinter import (
     BOTH, END, LEFT, X, BooleanVar, IntVar, StringVar, Tk, filedialog, messagebox,
@@ -15,7 +16,7 @@ from tkinter.scrolledtext import ScrolledText
 
 from . import client as client_mod
 from .config import APP_DIR, Config, load_config
-from .engine import LikeEngine, summarize
+from .engine import LikeEngine, parse_user_date, summarize
 
 
 class App:
@@ -94,10 +95,69 @@ class App:
             row3, text="跳过【进出口公司新闻资讯】", variable=self.skip_session_var
         ).pack(side=LEFT, padx=20)
 
+        # ---- 新闻时间段 ----
+        dates = ttk.LabelFrame(self.root, text="新闻时间段（只处理这个区间内的文章）")
+        dates.pack(fill=X, **pad)
+
+        drow1 = ttk.Frame(dates)
+        drow1.pack(fill=X, padx=10, pady=8)
+        ttk.Label(drow1, text="从").pack(side=LEFT)
+        self.since_var = StringVar(value="")
+        ttk.Entry(drow1, textvariable=self.since_var, width=14).pack(side=LEFT, padx=4)
+        ttk.Label(drow1, text="到").pack(side=LEFT)
+        self.until_var = StringVar(value=date.today().isoformat())
+        self.until_entry = ttk.Entry(drow1, textvariable=self.until_var, width=14)
+        self.until_entry.pack(side=LEFT, padx=4)
+        self.until_now_var = BooleanVar(value=True)
+        ttk.Checkbutton(
+            drow1,
+            text="至今",
+            variable=self.until_now_var,
+            command=self._toggle_until,
+        ).pack(side=LEFT)
+        ttk.Label(drow1, text="格式 YYYY-MM-DD，留空表示不限", foreground="#777").pack(
+            side=LEFT, padx=10
+        )
+
+        drow2 = ttk.Frame(dates)
+        drow2.pack(fill=X, padx=10, pady=(0, 8))
+        ttk.Label(drow2, text="快捷选择：").pack(side=LEFT)
+        for label, days in (
+            ("不限", None),
+            ("近 7 天", 7),
+            ("近 30 天", 30),
+            ("近 90 天", 90),
+            ("近 1 年", 365),
+        ):
+            ttk.Button(
+                drow2,
+                text=label,
+                width=8,
+                command=lambda d=days: self._quick_range(d),
+            ).pack(side=LEFT, padx=2)
+        self._toggle_until()
+
         log_frame = ttk.LabelFrame(self.root, text="运行日志")
         log_frame.pack(fill=BOTH, expand=True, **pad)
         self.log_box = ScrolledText(log_frame, height=16, wrap="word", state="disabled")
         self.log_box.pack(fill=BOTH, expand=True, padx=8, pady=8)
+
+    def _toggle_until(self) -> None:
+        """勾了"至今"就把结束日期框灰掉。"""
+        state = "disabled" if self.until_now_var.get() else "normal"
+        self.until_entry.configure(state=state)
+        if self.until_now_var.get():
+            self.until_var.set(date.today().isoformat())
+
+    def _quick_range(self, days) -> None:
+        today = date.today()
+        if days is None:
+            self.since_var.set("")
+            self.until_now_var.set(True)
+        else:
+            self.since_var.set((today - timedelta(days=days)).isoformat())
+            self.until_now_var.set(True)
+        self._toggle_until()
 
     # ------------------------------------------------------------------
     # 日志与状态
@@ -257,6 +317,24 @@ class App:
             self.log("客户端还没接管，请先点「① 准备」。")
             return
         self.cfg.skip_session_by_default = bool(self.skip_session_var.get())
+
+        # 时间段
+        since = self.since_var.get().strip()
+        until = "" if self.until_now_var.get() else self.until_var.get().strip()
+        for label, value in (("开始日期", since), ("结束日期", until)):
+            if value and parse_user_date(value) is None:
+                self.log(f"{label}格式不对：{value!r}，请用 YYYY-MM-DD。")
+                messagebox.showwarning(
+                    "日期格式不对", f"{label}：{value}\n请用 YYYY-MM-DD 格式，例如 2026-09-01。"
+                )
+                return
+        self.cfg.filter_since = since
+        self.cfg.filter_until = until
+        if since or until:
+            self.log(f"时间段：{since or '不限'} ~ {until or '今天'}")
+        else:
+            self.log("时间段：不限（全部文章）")
+
         engine = LikeEngine(
             self.cfg,
             dry_run=dry_run,

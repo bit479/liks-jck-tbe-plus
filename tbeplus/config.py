@@ -51,6 +51,12 @@ DEFAULTS: Dict[str, Any] = {
     # 门户卡片里的文章标题（用来做登录预热，点它打开的文章会带 SSO 票据）
     "portal_article_selector": ".article-title",
 
+    # ---------------- 时间段筛选 ----------------
+    # 只处理这个区间内的新闻；留空表示不限。
+    # 格式 YYYY-MM-DD（也接受 2026/9/1 这类写法）
+    "filter_since": "",
+    "filter_until": "",
+
     # ---------------- 登录预热 ----------------
     # 文章页需要一个 token，而只有"从门户卡片点出来"的链接才带 SSO 票据。
     # 所以开始干活前先从门户点开一篇文章，让新闻模块完成一次登录；
@@ -94,6 +100,10 @@ class Config:
     praise_active_selector: str = ".oper-area .praise-active"
     article_title_selector: str = ".article-item .article-title"
     portal_article_selector: str = ".article-title"
+
+    # 时间段筛选（YYYY-MM-DD，留空 = 不限）
+    filter_since: str = ""
+    filter_until: str = ""
 
     login_warmup: bool = True
     login_warmup_timeout: float = 40.0

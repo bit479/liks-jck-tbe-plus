@@ -17,6 +17,10 @@
   "praise_selector": ".oper-area .praise-num",
   "praise_active_selector": ".oper-area .praise-active",
 
+  "_时间段说明": "只处理这个区间内的新闻；两个都留空=不限。格式 YYYY-MM-DD，界面上也可以直接选。",
+  "filter_since": "",
+  "filter_until": "",
+
   "page_timeout": 30.0,
   "wait_after_click": 4.0,
   "confirm_wait": 5.0
