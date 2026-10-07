@@ -1,0 +1,7 @@
+# 运行本程序只需要 websockets，其余全用 Python 标准库。
+#
+# 注意：不需要 Playwright。TBe+ 是 2023 年的老 Electron 内核，
+# Playwright 的 connect_over_cdp 一连上就报
+# "Browser context management is not supported"，
+# 所以改成了直接说 Chrome DevTools Protocol（见 tbeplus/cdp.py）。
+websockets>=12.0
