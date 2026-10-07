@@ -165,13 +165,22 @@ class LikeEngine:
             "(() => {\n"
             f"  const active = document.querySelector({json.dumps(self.cfg.praise_active_selector)});\n"
             f"  const el = active || document.querySelector({json.dumps(self.cfg.praise_selector)});\n"
-            "  if (!el) return { found: false };\n"
+            "  const body = document.body ? document.body.innerText.slice(0, 80) : '';\n"
+            "  if (!el) return { found: false, body: body };\n"
             "  el.scrollIntoView({ block: 'center' });\n"
             "  const r = el.getBoundingClientRect();\n"
             "  return { found: true, liked: !!active, count: el.innerText.trim(),\n"
             "           x: r.left + r.width / 2, y: r.top + r.height / 2 };\n"
             "})()"
         )
+
+    @staticmethod
+    def _looks_logged_out(state: Optional[Dict[str, Any]]) -> bool:
+        """客户端没登录 / 会话过期时，文章页会显示"登录超时"之类的提示。"""
+        if not state:
+            return False
+        body = state.get("body") or ""
+        return ("登录超时" in body) or ("重新登录" in body) or ("请先登录" in body)
 
     async def _close_tab(self, marker: str) -> bool:
         """内容页是开在一个窗口里的标签页，关标签而不是关窗口。"""
@@ -485,6 +494,8 @@ class LikeEngine:
                         except CDPError:
                             pass
                         state = await s.evaluate(self._read_praise_js())
+                        if self._looks_logged_out(state):
+                            return "need-login"
                         if state and state.get("found"):
                             if state["liked"]:
                                 return "already-liked"
@@ -617,4 +628,8 @@ def summarize(results: List[SectionResult]) -> str:
             lines.append(f"  · {r.name}：失败（{r.error}）")
         else:
             lines.append(f"  · {r.name}：{r.total} 篇 → {_fmt(r.stats)}")
+    if any("need-login" in r.stats for r in results):
+        lines.append("")
+        lines.append("⚠ 文章页提示「登录超时，请重新登录」，说明 TBe+ 的新闻模块当前没登录。")
+        lines.append("  请打开 TBe+ 客户端确认能正常看新闻，必要时重新登录，然后重跑本程序。")
     return "\n".join(lines)

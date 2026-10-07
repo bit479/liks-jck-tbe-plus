@@ -5,7 +5,7 @@
 自动遍历 **【Tbe+新闻资讯】**、**【进出口公司新闻资讯】**、**【开讲了】** 三个板块，
 把每一篇还没点赞的文章都点上；已经点过的会自动跳过，不会重复点。
 
-包装成了一个双击就能跑的小程序（图形界面），不用记命令。
+包装成了一个双击就能跑的小程序（图形界面），不用记命令，**也不用装任何第三方库**。
 
 ---
 
@@ -21,7 +21,14 @@
    | **② 试运行（只看不点）** | 只扫描，列出哪些文章没点赞，**不点** |
    | **③ 开始点赞** | 正式执行 |
 
-第一次运行 `启动.bat` 会自动装依赖，之后就秒开。
+**环境要求：只有一个——电脑上装真正的 Python 3.10+。**
+不用 pip、不用联网装依赖（详见下面「为什么零依赖」）。
+
+> **没装 Python 或装成了微软商店版？**
+> `启动.bat` 会直接告诉你，并给出官方下载地址。
+> 注意微软商店那个 Python 是跑不了脚本的，一定要从
+> [python.org](https://www.python.org/downloads/) 下载官方安装包，
+> 安装时勾选 **Add python.exe to PATH**。
 
 > **为什么要点「① 准备」？**
 > TBe+ 没有网页版登录入口，新闻站还有 WAF 只放行客户端内部的请求，
@@ -61,7 +68,25 @@ Protocol error (Browser.setDownloadBehavior): Browser context management is not 
 
 所以改成了自己写一个极简的 CDP 客户端（`tbeplus/cdp.py`，200 行不到），
 只用 `Runtime` / `Input` / `Page` 这几个最基础的域——老内核全都支持。
-**整个项目只需要 `websockets` 一个第三方依赖。**
+
+### 为什么零依赖
+
+CDP 需要一条 WebSocket 连接。一开始用了第三方库 `websockets`，
+结果用户那边 `启动.bat` 经常卡在
+`[错误] 依赖安装失败，请检查网络后重试`——因为 Windows 上
+`where python` 很容易命中**微软商店的占位符**，那个东西根本没装 Python，
+后面 `import websockets`、`pip install` 自然全失败。
+
+所以干脆用标准库自己实现了 WebSocket 客户端（`tbeplus/ws.py`，
+握手 / 掩码 / 分片 / ping-pong / 关闭帧都覆盖了），
+**从此一个第三方包都不需要**：不用 pip、不用联网、不会再有依赖问题。
+
+这套实现有自带的自检：
+
+```bash
+python tests/test_websocket.py
+# [PASS] WebSocket 实现全部通过（握手 / 掩码 / 大消息 / 分片 / ping-pong / 事件）
+```
 
 ### 实测出来的页面结构
 
@@ -129,6 +154,20 @@ Protocol error (Browser.setDownloadBehavior): Browser context management is not 
 
 ## 常见问题
 
+**双击 `启动.bat` 提示"没有找到可用的 Python"**
+
+电脑上没装 Python，或者装的是微软商店版。请到
+[python.org](https://www.python.org/downloads/) 下载官方安装包，
+安装时勾选 **Add python.exe to PATH**。
+（老版本会报 `依赖安装失败，请检查网络后重试`，那是把
+"找不到 Python"误报成了网络问题，现在已修好。）
+
+**提示"文章页显示登录超时"**
+
+说明 TBe+ 客户端里新闻模块的会话过期了。先在客户端里手动点开
+一篇新闻，确认能正常显示；如果客户端自己也打不开，请在客户端里
+重新登录一次，然后重跑本程序。
+
 **提示"没检测到 TBe+ 在运行"**
 先把 TBe+ 客户端打开，再点「① 准备」。
 
@@ -155,16 +194,20 @@ Protocol error (Browser.setDownloadBehavior): Browser context management is not 
 liks-jck-tbe-plus/
 ├── 启动.bat              双击启动图形界面
 ├── 命令行.bat            打开命令行
+├── _python.bat           查找可用的 Python（启动脚本共用）
 ├── app.py                图形界面入口
 ├── cli.py                命令行入口
-├── requirements.txt      只有 websockets
+├── requirements.txt      说明"无第三方依赖"
 ├── config.example.json   配置示例（复制成 config.json 生效）
 ├── tbeplus/
 │   ├── config.py         配置
+│   ├── ws.py             极简 WebSocket 客户端（标准库实现）
 │   ├── cdp.py            极简 CDP 客户端
 │   ├── client.py         接管客户端（带调试端口重启）
 │   ├── engine.py         点赞引擎
 │   └── ui.py             图形界面
+├── tests/
+│   └── test_websocket.py WebSocket 实现自检
 └── LICENSE
 ```
 

@@ -1,21 +1,26 @@
-"""极简 Chrome DevTools Protocol 客户端。
+"""极简 Chrome DevTools Protocol 客户端（零第三方依赖）。
 
 为什么不用 Playwright：
 TBe+ 桌面端是 2023 年版本的老 Electron 内核，不支持 browser context 管理，
 Playwright 的 connect_over_cdp 一连上就报
     Protocol error (Browser.setDownloadBehavior): Browser context management is not supported
-所以这里直接对着 DevTools 协议说话——只用到 Runtime / DOM / Input / Page
-这几个最基础的域，老内核全都支持。
+
+为什么自己写 WebSocket：
+这样整个程序一个第三方包都不需要——用户只要有 Python 就能跑，
+不用 pip、不用联网装依赖。
+
+只用到 Runtime / Input / Page 这几个最基础的域，老内核全都支持。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-import websockets
+from .ws import WebSocketConnection, WebSocketError
 
 
 class CDPError(RuntimeError):
@@ -44,16 +49,19 @@ def is_debug_port_open(port: int, host: str = "127.0.0.1") -> bool:
 
 
 class CDPSession:
-    """连到一个调试目标的 WebSocket，发命令收结果。"""
+    """连到一个调试目标，发命令收结果。
+
+    底层是阻塞 socket，所以真正的收发放在线程里跑（asyncio.to_thread），
+    再用一把线程锁保证同一时刻只有一个请求在跑。
+    """
 
     def __init__(self, ws_url: str, timeout: float = 30.0):
         self.ws_url = ws_url
         self.timeout = timeout
-        self._ws: Any = None
-        self._next_id = 0
-        self._pending: Dict[int, asyncio.Future] = {}
-        self._reader: Optional[asyncio.Task] = None
         self.events: List[Dict[str, Any]] = []
+        self._conn: Optional[WebSocketConnection] = None
+        self._io_lock = threading.Lock()
+        self._next_id = 0
 
     async def __aenter__(self) -> "CDPSession":
         await self.connect()
@@ -62,56 +70,52 @@ class CDPSession:
     async def __aexit__(self, *exc_info) -> None:
         await self.close()
 
+    # ------------------------------------------------------------------
     async def connect(self) -> None:
-        self._ws = await websockets.connect(
-            self.ws_url, max_size=128 * 1024 * 1024, open_timeout=self.timeout
-        )
-        self._reader = asyncio.create_task(self._read_loop())
-
-    async def _read_loop(self) -> None:
+        self._conn = WebSocketConnection(self.ws_url, timeout=self.timeout)
         try:
-            async for raw in self._ws:
-                message = json.loads(raw)
-                mid = message.get("id")
-                if mid is not None and mid in self._pending:
-                    future = self._pending.pop(mid)
-                    if "error" in message:
-                        future.set_exception(CDPError(str(message["error"])))
-                    else:
-                        future.set_result(message.get("result") or {})
-                else:
-                    self.events.append(message)
-                    if len(self.events) > 500:
-                        del self.events[:250]
-        except Exception:
-            for future in self._pending.values():
-                if not future.done():
-                    future.set_exception(CDPError("CDP 连接已断开"))
-            self._pending.clear()
+            await asyncio.to_thread(self._conn.connect)
+        except (WebSocketError, OSError, TimeoutError) as exc:
+            raise CDPError(f"连接调试目标失败：{exc}") from exc
 
-    async def send(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        if self._ws is None:
+    # ------------------------------------------------------------------
+    def _call(self, method: str, params: Optional[Dict[str, Any]], timeout: float) -> Dict[str, Any]:
+        """阻塞式收发一轮（在线程里执行）。"""
+        if self._conn is None:
             raise CDPError("尚未连接")
-        self._next_id += 1
-        mid = self._next_id
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
-        self._pending[mid] = future
+        with self._io_lock:
+            self._next_id += 1
+            mid = self._next_id
+            payload = json.dumps({"id": mid, "method": method, "params": params or {}})
+            deadline = self._conn.deadline(timeout)
+            self._conn.send_text(payload)
+            while True:
+                message = json.loads(self._conn.recv_text(deadline))
+                if message.get("id") == mid:
+                    if "error" in message:
+                        raise CDPError(str(message["error"]))
+                    return message.get("result") or {}
+                # 不是本次的应答，当事件先存着
+                self.events.append(message)
+                if len(self.events) > 500:
+                    del self.events[:250]
+
+    async def send(
+        self, method: str, params: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
         try:
-            await self._ws.send(
-                json.dumps({"id": mid, "method": method, "params": params or {}})
+            return await asyncio.to_thread(
+                self._call, method, params, timeout or self.timeout
             )
-            return await asyncio.wait_for(future, timeout=self.timeout)
-        except asyncio.TimeoutError as exc:
-            self._pending.pop(mid, None)
-            raise CDPError(f"{method} 超时") from exc
         except CDPError:
-            self._pending.pop(mid, None)
             raise
-        except Exception as exc:
+        except asyncio.TimeoutError as exc:
+            raise CDPError(f"{method} 超时") from exc
+        except (WebSocketError, OSError, TimeoutError, ValueError) as exc:
             # 页面重载 / 窗口关闭会把连接掐掉，统一成 CDPError 好让上层重连
-            self._pending.pop(mid, None)
             raise CDPError(f"{method} 连接断开：{exc}") from exc
 
+    # ------------------------------------------------------------------
     async def evaluate(self, expression: str, await_promise: bool = True) -> Any:
         result = await self.send(
             "Runtime.evaluate",
@@ -152,13 +156,11 @@ class CDPSession:
         except CDPError:
             pass
 
+    # ------------------------------------------------------------------
     async def close(self) -> None:
-        if self._reader is not None:
-            self._reader.cancel()
-            self._reader = None
-        if self._ws is not None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
             try:
-                await self._ws.close()
+                await asyncio.to_thread(conn.close)
             except Exception:
                 pass
-            self._ws = None

@@ -1,7 +1,11 @@
-# 运行本程序只需要 websockets，其余全用 Python 标准库。
+# 本程序没有任何第三方依赖，不需要 pip，也不需要联网。
 #
-# 注意：不需要 Playwright。TBe+ 是 2023 年的老 Electron 内核，
-# Playwright 的 connect_over_cdp 一连上就报
-# "Browser context management is not supported"，
-# 所以改成了直接说 Chrome DevTools Protocol（见 tbeplus/cdp.py）。
-websockets>=12.0
+# 只需要电脑上装一个真正的 Python 3.10+：
+#     https://www.python.org/downloads/
+#
+# 说明：本来用了 websockets 这个库做 CDP 通信，但那样用户还得先 pip
+# 装一次包，网络不通就卡住。所以改成自己用标准库实现了 WebSocket
+# 客户端（见 tbeplus/ws.py），从此零依赖。
+#
+# 这个文件保留只是为了告诉 `pip install -r requirements.txt` 的用户：
+# 什么都不用装。
