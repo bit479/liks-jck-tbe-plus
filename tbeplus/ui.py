@@ -353,10 +353,14 @@ class App:
 
 
 def run_ui(config: Config | None = None) -> None:
+    from .app_icon import set_app_user_model_id, set_window_icon
+
+    set_app_user_model_id()   # 必须在 Tk() 之前，否则任务栏显示 python 图标
     root = Tk()
     try:
         root.call("tk", "scaling", 1.25)
     except Exception:
         pass
+    set_window_icon(root)     # 标题栏左上角 + 任务栏图标
     App(root, config or load_config())
     root.mainloop()

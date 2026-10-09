@@ -9,6 +9,17 @@ if not defined PY goto :no_python
 
 echo 使用的 Python：%PY%
 echo.
+rem --- GUI: prefer pythonw (same folder as python.exe), no console window ---
+set "PYW=%PY:python.exe=pythonw.exe%"
+if exist "%PYW%" (
+  start "" "%PYW%" -X utf8 "%~dp0app.py"
+  goto :run_ok
+)
+where pythonw >nul 2>nul
+if not errorlevel 1 (
+  start "" pythonw -X utf8 "%~dp0app.py"
+  goto :run_ok
+)
 "%PY%" app.py
 
 if errorlevel 1 (
@@ -17,6 +28,7 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+:run_ok
 endlocal
 exit /b 0
 
