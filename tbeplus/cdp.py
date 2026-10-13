@@ -34,18 +34,20 @@ def list_targets(port: int, host: str = "127.0.0.1", timeout: float = 5.0) -> Li
         return json.loads(resp.read().decode("utf-8"))
 
 
-def browser_endpoint(port: int, host: str = "127.0.0.1") -> Optional[str]:
+def browser_endpoint(
+    port: int, host: str = "127.0.0.1", timeout: float = 5.0
+) -> Optional[str]:
     """GET /json/version，拿浏览器级 WebSocket 地址。"""
     try:
         url = f"http://{host}:{port}/json/version"
-        with urllib.request.urlopen(url, timeout=5) as resp:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8")).get("webSocketDebuggerUrl")
     except Exception:
         return None
 
 
-def is_debug_port_open(port: int, host: str = "127.0.0.1") -> bool:
-    return browser_endpoint(port, host) is not None
+def is_debug_port_open(port: int, host: str = "127.0.0.1", timeout: float = 5.0) -> bool:
+    return browser_endpoint(port, host, timeout) is not None
 
 
 class CDPSession:

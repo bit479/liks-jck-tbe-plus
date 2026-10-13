@@ -6,6 +6,7 @@
     "C:\\Program Files (x86)\\tbea\\2305251534\\TBe.exe",
     "C:\\Program Files (x86)\\tbea\\TBe.exe"
   ],
+  "_debug_port说明": "起始调试端口。如果这个端口被占用、或落在 Windows 保留端口段里，程序会自动往后找可用端口，并把实际用的那个写回这里。",
   "debug_port": 9222,
   "restart_wait_seconds": 90,
 

@@ -80,9 +80,11 @@ async def main() -> int:
         print(message, flush=True)
 
     if args.check:
-        if client_mod.is_attached(cfg.debug_port):
-            log(f"已接管（端口 {cfg.debug_port}）")
-            for kind, title in client_mod.summarize_targets(cfg.debug_port):
+        port = client_mod.resolve_debug_port(cfg.debug_port, log)
+        if port:
+            cfg.debug_port = port
+            log(f"已接管（端口 {port}）")
+            for kind, title in client_mod.summarize_targets(port):
                 log(f"  {kind:9} {title[:60]}")
             return 0
         log("没有调试接口。先跑：python cli.py --attach")
@@ -100,8 +102,13 @@ async def main() -> int:
         cfg.client_exe_candidates = [str(exe)] + list(cfg.client_exe_candidates)
 
     if args.attach:
-        if client_mod.is_attached(cfg.debug_port):
-            log(f"已经处于可接管状态（端口 {cfg.debug_port}）")
+        preferred = cfg.debug_port
+        found = client_mod.resolve_debug_port(preferred, log)
+        if found:
+            cfg.debug_port = found
+            if found != preferred:
+                client_mod.save_debug_port(found)
+            log(f"已经处于可接管状态（端口 {found}）")
             return 0
         exe = client_mod.resolve_client_exe(cfg.client_exe_candidates, log)
         if exe is None:
@@ -110,12 +117,22 @@ async def main() -> int:
             log('  python cli.py --client-exe "D:\\...\\tbea\\2305251534\\TBe.exe"')
             log("指定过的路径会记进 config.json，以后不用再填。")
             return 2
-        ok = client_mod.restart_client(exe, cfg.debug_port, cfg.restart_wait_seconds, log)
-        return 0 if ok else 2
+        used = client_mod.restart_client(exe, preferred, cfg.restart_wait_seconds, log)
+        if not used:
+            return 2
+        cfg.debug_port = used
+        if used != preferred:
+            client_mod.save_debug_port(used)
+            log(f"已经把端口 {used} 记到 config.json，以后会自动用它。")
+        return 0
 
-    if not client_mod.is_attached(cfg.debug_port):
-        log(f"端口 {cfg.debug_port} 上没有调试接口，请先跑：python cli.py --attach")
+    port = client_mod.resolve_debug_port(cfg.debug_port)
+    if port is None:
+        log(
+            f"端口 {cfg.debug_port} 往后都没找到调试接口，请先跑：python cli.py --attach"
+        )
         return 1
+    cfg.debug_port = port
 
     engine = LikeEngine(cfg, dry_run=args.dry_run, log=log)
 

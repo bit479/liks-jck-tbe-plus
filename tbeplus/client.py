@@ -17,6 +17,7 @@ TBe.exe 的位置每台机器可能都不一样，所以这里除了读配置，
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -25,6 +26,9 @@ from typing import Callable, Iterable, List, Optional
 from .cdp import is_debug_port_open, list_targets
 
 LogFn = Callable[[str], None]
+
+# 从配置的端口开始，向后试多少个端口
+PORT_SCAN_COUNT = 20
 
 
 def _noop(_: str) -> None:
@@ -55,7 +59,12 @@ def is_attached(port: int) -> bool:
 
 
 def is_client_running() -> bool:
-    return bool(_run_powershell("(Get-Process TBe -ErrorAction SilentlyContinue).Count"))
+    # 注意：PowerShell 返回的是字符串 "0"，直接 bool() 会当成真，必须转成数字再判断
+    out = _run_powershell("(Get-Process TBe -ErrorAction SilentlyContinue).Count")
+    try:
+        return int(out.strip()) > 0
+    except ValueError:
+        return False
 
 
 def summarize_targets(port: int) -> List[tuple]:
@@ -249,14 +258,129 @@ def resolve_client_exe(candidates: Iterable[str], log: LogFn = _noop) -> Optiona
 # ---------------------------------------------------------------------------
 # 启停客户端
 # ---------------------------------------------------------------------------
-def stop_client(log: LogFn = _noop) -> None:
-    log("正在关闭 TBe+ …")
-    subprocess.run(
-        ["powershell", "-NoProfile", "-Command",
-         "Get-Process TBe -ErrorAction SilentlyContinue | Stop-Process -Force"],
-        capture_output=True, text=True, timeout=30,
+def port_available(port: int) -> bool:
+    """这个端口现在能不能绑上。
+
+    用来同时避开两种情况：
+      1. 端口被别的程序占着；
+      2. 端口落在 Windows 的保留端口段里（装了 Hyper-V / WSL / Docker 之后
+         系统会预留一些段，落在里面的端口连管理员也绑不上，
+         客户端就会静默地起不来调试端口）。
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", port))
+        sock.listen(1)
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def find_available_port(preferred: int, count: int = PORT_SCAN_COUNT):
+    """从 preferred 开始找一个真能用的端口，找不到返回 None。"""
+    for offset in range(count):
+        port = preferred + offset
+        if port_available(port):
+            return port
+    return None
+
+
+def port_owner(port: int) -> str:
+    """查一下端口被谁占着（只用于日志提示）。"""
+    script = (
+        f"$c = Get-NetTCPConnection -LocalPort {port} -State Listen "
+        "-ErrorAction SilentlyContinue | Select-Object -First 1;"
+        "if ($c) { $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue;"
+        " if ($p) { $p.ProcessName + ' (PID ' + $p.Id + ')' } else "
+        "{ 'PID ' + $c.OwningProcess } }"
     )
-    time.sleep(3)
+    return _run_powershell(script, timeout=15).strip()
+
+
+def is_tbe_debug_port(port: int) -> bool:
+    """这个端口上的调试接口是不是我们的 TBe+ 客户端。
+
+    只判断"有 CDP 接口"是不够的——别的程序（比如手动调试的 Chrome）
+    也可能占着同一个端口。
+    """
+    # 扫描时用短超时，避免个别端口没响应时卡住
+    if not is_debug_port_open(port, timeout=1.5):
+        return False
+    try:
+        for target in list_targets(port, timeout=2):
+            url = target.get("url") or ""
+            if "app.asar" in url or url.startswith("miniapp://"):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def resolve_debug_port(preferred: int, log: LogFn = _noop):
+    """找出当前真正可以用的调试端口。
+
+    先看配置里的，再往后扫一段——因为上一次可能因为端口冲突自动换过端口，
+    客户端还在那个端口上跑着。
+    """
+    for offset in range(PORT_SCAN_COUNT):
+        port = preferred + offset
+        if is_tbe_debug_port(port):
+            if offset:
+                log(f"在端口 {port} 上发现了已接管的客户端")
+            return port
+    return None
+
+
+def save_debug_port(port: int) -> bool:
+    """把实际使用的端口记进 config.json。"""
+    return _save_config({"debug_port": port})
+
+
+def _save_config(patch: dict) -> bool:
+    from .config import CONFIG_FILE
+
+    data: dict = {}
+    if CONFIG_FILE.is_file():
+        try:
+            loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    data.update(patch)
+    try:
+        CONFIG_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return True
+    except OSError:
+        return False
+
+
+def stop_client(log: LogFn = _noop) -> bool:
+    """把 TBe+ 关干净。
+
+    这一步很关键：TBe+ 是单实例的，旧进程还在的话，新进程只会把窗口
+    唤到前面然后自己退出，**调试端口根本不会开**。表现就是一直连不上。
+    """
+    log("正在关闭 TBe+ …")
+    script = (
+        "Get-Process TBe -ErrorAction SilentlyContinue | Stop-Process -Force;"
+        "Start-Sleep -Milliseconds 800"
+    )
+    for attempt in range(3):
+        _run_powershell(script, timeout=30)
+        time.sleep(2)
+        if not is_client_running():
+            log("  客户端已关闭")
+            return True
+        log(f"  还有 TBe 进程没退出，再试一次（{attempt + 1}/3）")
+
+    log("  提示：TBe 进程没能全部关掉。若它是单实例的，新进程可能开不出调试端口。")
+    log("  可以手动退出 TBe+（托盘图标右键退出），然后再点一次「① 准备」。")
+    return False
 
 
 def start_client(exe: Path, port: int, log: LogFn = _noop) -> None:
@@ -285,36 +409,66 @@ def wait_for_port(port: int, timeout: float, log: LogFn = _noop) -> bool:
     return False
 
 
-def restart_client(exe: Path, port: int, timeout: float, log: LogFn = _noop) -> bool:
-    """关掉再带调试端口启动，并等端口就绪。"""
+def restart_client(
+    exe: Path, preferred_port: int, timeout: float, log: LogFn = _noop
+):
+    """关掉客户端再带调试端口启动。返回实际使用的端口；失败返回 None。"""
+    existing = resolve_debug_port(preferred_port, log)
+    if existing is not None:
+        log(f"客户端已经处于可接管状态（端口 {existing}），不用重启")
+        return existing
+
     stop_client(log)
+
+    port = find_available_port(preferred_port)
+    if port is None:
+        log(
+            f"从 {preferred_port} 往后找了 {PORT_SCAN_COUNT} 个端口都不可用，"
+            "没法给客户端开调试端口。"
+        )
+        log("  请检查是不是有程序占着一大片端口，或者系统保留端口段太大。")
+        return None
+    if port != preferred_port:
+        owner = port_owner(preferred_port)
+        reason = f"被 {owner} 占用" if owner else "可能落在 Windows 保留端口段里"
+        log(f"端口 {preferred_port} 当前不可用（{reason}）")
+        log(f"  自动改用端口 {port}")
+
     start_client(exe, port, log)
-    return wait_for_port(port, timeout, log)
+    if wait_for_port(port, timeout, log):
+        return port
+
+    owner = port_owner(port)
+    log(f"等不到调试端口 {port}。")
+    if owner:
+        log(f"  该端口正被 {owner} 占用")
+    if not is_client_running():
+        log("  客户端进程也不在了，说明它启动后立刻退出了。")
+        log("  常见原因：单实例锁（旧进程没关干净），或者被安全软件拦了。")
+        log("  请手动退出 TBe+（托盘图标右键退出）后再点一次「① 准备」。")
+    else:
+        log("  TBe+ 在运行，但没开调试端口，多半是端口问题。")
+        log("  可以运行下面这条命令查看系统保留端口段：")
+        log("    netsh int ipv4 show excludedportrange protocol=tcp")
+        log("  也可以在 config.json 里把 debug_port 改成别的值（比如 19222）后重试。")
+    return None
 
 
 def save_client_exe(exe: Path, existing: Iterable[str] = ()) -> bool:
     """把找到的路径记进 config.json，下次直接命中。"""
     from .config import CONFIG_FILE
 
-    data: dict = {}
+    known: list = []
     if CONFIG_FILE.is_file():
         try:
             loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
-                data = loaded
+                known = list(loaded.get("client_exe_candidates") or [])
         except (OSError, json.JSONDecodeError):
-            data = {}
+            known = []
 
     candidates = [str(exe)]
-    for item in list(existing) + list(data.get("client_exe_candidates") or []):
+    for item in list(existing) + known:
         if item and item not in candidates:
             candidates.append(item)
-    data["client_exe_candidates"] = candidates
-
-    try:
-        CONFIG_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        return True
-    except OSError:
-        return False
+    return _save_config({"client_exe_candidates": candidates})

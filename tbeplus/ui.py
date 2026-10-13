@@ -180,15 +180,16 @@ class App:
         self.root.after(120, self._drain_log)
 
     def _refresh_status(self) -> None:
-        port = self.cfg.debug_port
-        if client_mod.is_attached(port):
+        port = client_mod.resolve_debug_port(self.cfg.debug_port)
+        if port:
+            self.cfg.debug_port = port
             targets = client_mod.summarize_targets(port)
             titles = "，".join(t for _, t in targets if t)[:70]
             self.status_var.set(
                 f"● 已接管（端口 {port}）　视图 {len(targets)} 个　{titles}"
             )
         elif client_mod.is_client_running():
-            self.status_var.set(f"● TBe+ 正在运行，但没开调试端口 {port}。请点「① 准备」。")
+            self.status_var.set("● TBe+ 正在运行，但没开调试端口。请点「① 准备」。")
         else:
             self.status_var.set("● 没检测到 TBe+ 在运行。")
 
@@ -253,8 +254,14 @@ class App:
         self._start("准备：重启并接管 TBe+", self._attach_job)
 
     async def _attach_job(self) -> None:
-        if client_mod.is_attached(self.cfg.debug_port):
-            self.log(f"客户端已经处于可接管状态（端口 {self.cfg.debug_port}）")
+        preferred = self.cfg.debug_port
+
+        found = client_mod.resolve_debug_port(preferred, self.log)
+        if found:
+            self.cfg.debug_port = found
+            if found != preferred:
+                client_mod.save_debug_port(found)
+            self.log(f"客户端已经处于可接管状态（端口 {found}）")
             self.log("准备完成，可以点「② 试运行」或「③ 开始点赞」了。")
             return
 
@@ -275,10 +282,18 @@ class App:
                 self.cfg.client_exe_candidates
             )
 
-        ok = client_mod.restart_client(
-            exe, self.cfg.debug_port, self.cfg.restart_wait_seconds, self.log
+        used = client_mod.restart_client(
+            exe, preferred, self.cfg.restart_wait_seconds, self.log
         )
-        self.log("准备完成，可以点「② 试运行」或「③ 开始点赞」了。" if ok else "准备失败。")
+        if not used:
+            self.log("准备失败。")
+            return
+
+        self.cfg.debug_port = used
+        if used != preferred:
+            client_mod.save_debug_port(used)
+            self.log(f"已经把端口 {used} 记到 config.json，以后会自动用它。")
+        self.log(f"准备完成（调试端口 {used}），可以点「② 试运行」或「③ 开始点赞」了。")
 
     def _ask_client_exe(self) -> str:
         """弹文件选择框。tkinter 必须在主线程调用，所以用 after + Event 转过去。"""
@@ -313,9 +328,11 @@ class App:
         self._start("正式点赞", lambda: self._run_job(False))
 
     async def _run_job(self, dry_run: bool) -> None:
-        if not client_mod.is_attached(self.cfg.debug_port):
+        port = client_mod.resolve_debug_port(self.cfg.debug_port)
+        if port is None:
             self.log("客户端还没接管，请先点「① 准备」。")
             return
+        self.cfg.debug_port = port
         self.cfg.skip_session_by_default = bool(self.skip_session_var.get())
 
         # 时间段
