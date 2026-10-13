@@ -9,5 +9,5 @@
     ui       图形界面
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __all__ = ["config", "ws", "cdp", "client", "engine", "ui"]

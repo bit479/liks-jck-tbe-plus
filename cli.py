@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tbeplus import client as client_mod  # noqa: E402
+from tbeplus import __version__ as VERSION  # noqa: E402
 from tbeplus.config import load_config  # noqa: E402
 from tbeplus.engine import LikeEngine, parse_user_date, summarize  # noqa: E402
 
@@ -78,6 +79,7 @@ def parse_args() -> argparse.Namespace:
 async def main() -> int:
     args = parse_args()
     cfg = load_config()
+    print(f"liks jck tbe+ v{VERSION}", flush=True)
     if args.no_session:
         cfg.skip_session_by_default = True
 

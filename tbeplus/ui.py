@@ -14,6 +14,7 @@ from tkinter import (
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
+from . import __version__ as VERSION
 from . import client as client_mod
 from .config import APP_DIR, Config, load_config
 from .engine import LikeEngine, parse_user_date, summarize
@@ -27,7 +28,7 @@ class App:
         self.worker: threading.Thread | None = None
         self.stop_flag = threading.Event()
 
-        root.title("TBe+ 新闻资讯自动点赞")
+        root.title(f"TBe+ 新闻资讯自动点赞 v{VERSION}")
         root.geometry("840x620")
         root.minsize(720, 520)
 
