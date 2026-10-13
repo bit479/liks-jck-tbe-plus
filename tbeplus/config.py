@@ -76,6 +76,8 @@ DEFAULTS: Dict[str, Any] = {
     # 只在取不到 isEnd（页面结构变了）时才用到的兜底判断
     "list_scroll_stable": 10,
     "list_load_timeout": 180.0,
+    # 按页拉列表时最多拉多少页（每页 10 篇，200 页够覆盖任何频道）
+    "list_max_pages": 200,
     # 每次滚动后的等待（原来 2 秒，太保守）
     "list_scroll_interval": 1.2,
 
@@ -100,6 +102,29 @@ DEFAULTS: Dict[str, Any] = {
     "api_mode": True,
     "api_batch_size": 20,
     "api_base": "https://tbeanews.tbea.com/api",
+    # Chromium 对同一个域名只开 6 条并发连接，发太多会排队甚至整体挂死
+    "api_concurrency": 6,
+    # 单个请求的最长时间。实测新闻站慢起来要 8 秒以上，卡太死会误判成失败
+    "api_request_timeout": 20.0,
+    # 一批的 CDP 调用超时（比页面超时长一些）
+    "api_batch_timeout": 180.0,
+    # 点赞前是否先查一次文章状态。
+    # 查状态是三个接口里最慢的（平均 2.5 秒），关掉只发点赞请求能快好几倍；
+    # 打开则能在日志里区分"本来就没赞"和"早就赞过"。
+    "api_read_state": False,
+    # 点赞后再查一次，确认服务端状态确实变成已赞（慢，默认关）
+    "api_verify": False,
+    # 没成功的文章再重试几轮（每轮之间会刷新接口页面）
+    "api_like_rounds": 3,
+    # 发请求的最高频率（每秒几个）。
+    # 实测服务端大约每 60 秒只放行 120 次点赞请求：第 121 次开始整片失败
+    # （返回的业务码不是 1），一直失败到下一个时间窗才恢复。
+    # 翻页请求也占同一份额度，所以起步就留出余量：1.4/秒 ≈ 84 次/分钟。
+    # 真撞上了程序会自动再降速。0 = 不限速
+    "api_rate": 1.4,
+    # 一轮没成功，等多久再重试（服务端限流是按时间窗算的，
+    # 立刻重试只会撞在同一窗口里，这就是"重试仍失败"的真实原因）
+    "api_backoff": 20.0,
 }
 
 
@@ -136,6 +161,7 @@ class Config:
     list_scroll_rounds: int = 60
     list_scroll_stable: int = 10
     list_load_timeout: float = 180.0
+    list_max_pages: int = 200
     list_scroll_interval: float = 1.2
 
     page_timeout: float = 30.0
@@ -149,6 +175,14 @@ class Config:
     api_mode: bool = True
     api_batch_size: int = 20
     api_base: str = "https://tbeanews.tbea.com/api"
+    api_concurrency: int = 6
+    api_request_timeout: float = 20.0
+    api_batch_timeout: float = 180.0
+    api_read_state: bool = False
+    api_verify: bool = False
+    api_like_rounds: int = 3
+    api_rate: float = 1.4
+    api_backoff: float = 20.0
 
     # ------------------------------------------------------------------
     @property

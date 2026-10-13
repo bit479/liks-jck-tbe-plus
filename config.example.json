@@ -34,8 +34,18 @@
   "_重启清理说明": "客户端每开一篇文章就新建一个页面且不回收，跑多了会拖慢。每处理 N 篇重启一次把它清零；0 = 不重启。",
   "restart_every_n_articles": 60,
 
-  "_接口模式说明": "登录后直接调新闻站接口读写点赞状态，不打开文章页面（快得多）。api_batch_size 是一批并行处理多少篇。用不了会自动退回打开页面的方式。",
+  "_接口模式说明": "登录后直接调新闻站接口读写点赞状态，不打开文章页面（快得多）。api_batch_size 是一批处理多少篇，api_concurrency 是同时发几个请求（同域连接数有限，别调太大）。用不了会自动退回打开页面的方式。",
   "api_mode": true,
   "api_batch_size": 20,
-  "api_base": "https://tbeanews.tbea.com/api"
+  "api_concurrency": 6,
+  "api_base": "https://tbeanews.tbea.com/api",
+  "_读状态说明": "点赞接口本身对已赞文章是幂等的，所以默认直接点赞、不查状态，每篇只要 0.6 秒左右。打开 api_read_state 会每篇多一次慢查询（约 2.5 秒），换来能区分'本来就没赞'和'早就赞过'。api_verify 是点赞后再复查一次。",
+  "api_read_state": false,
+  "api_verify": false,
+  "api_request_timeout": 20.0,
+  "_限速说明": "服务端大约每 60 秒只放行 120 次点赞请求，超了就一直失败到下一个时间窗。api_rate 限制每秒最多发几个请求（1.8 ≈ 108 次/分钟，安全）；api_like_rounds 是失败后重试几轮，api_backoff 是每轮之间等多少秒（成倍递增）。",
+  "api_rate": 1.8,
+  "api_like_rounds": 3,
+  "api_backoff": 20.0,
+  "list_max_pages": 200
 }

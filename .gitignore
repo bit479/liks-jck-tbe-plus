@@ -14,6 +14,8 @@ output/
 *.log
 state.json
 storage_state.json
+# 调试用的临时探针脚本
+_probe*.py
 
 # 编辑器
 .idea/

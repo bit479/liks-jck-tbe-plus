@@ -62,6 +62,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="不用接口模式，改回逐个打开文章页面的老办法",
     )
+    parser.add_argument(
+        "--read-state",
+        action="store_true",
+        help="点赞前先查一次文章状态（能区分早就赞过的，但每篇多 2 秒左右）",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="点赞后再查一次确认（最慢，适合想看得明明白白的时候）",
+    )
     return parser.parse_args()
 
 
@@ -90,6 +100,11 @@ async def main() -> int:
         cfg.restart_every_n_articles = args.restart_every
     if args.no_api:
         cfg.api_mode = False
+    if args.read_state or args.verify:
+        # --verify 隐含要先查状态，否则只能得到"复查到已赞"这一个结论
+        cfg.api_read_state = True
+    if args.verify:
+        cfg.api_verify = True
 
     def log(message: str) -> None:
         print(message, flush=True)
