@@ -32,5 +32,10 @@
   "list_scroll_interval": 1.2,
 
   "_重启清理说明": "客户端每开一篇文章就新建一个页面且不回收，跑多了会拖慢。每处理 N 篇重启一次把它清零；0 = 不重启。",
-  "restart_every_n_articles": 60
+  "restart_every_n_articles": 60,
+
+  "_接口模式说明": "登录后直接调新闻站接口读写点赞状态，不打开文章页面（快得多）。api_batch_size 是一批并行处理多少篇。用不了会自动退回打开页面的方式。",
+  "api_mode": true,
+  "api_batch_size": 20,
+  "api_base": "https://tbeanews.tbea.com/api"
 }

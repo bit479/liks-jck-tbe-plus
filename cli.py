@@ -57,6 +57,11 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help="每处理 N 篇重启一次客户端，清理它累积的页面（0=不重启）",
     )
+    parser.add_argument(
+        "--no-api",
+        action="store_true",
+        help="不用接口模式，改回逐个打开文章页面的老办法",
+    )
     return parser.parse_args()
 
 
@@ -83,6 +88,8 @@ async def main() -> int:
         cfg.filter_until = args.until
     if args.restart_every is not None:
         cfg.restart_every_n_articles = args.restart_every
+    if args.no_api:
+        cfg.api_mode = False
 
     def log(message: str) -> None:
         print(message, flush=True)

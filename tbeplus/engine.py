@@ -28,7 +28,14 @@ from .config import Config
 LogFn = Callable[[str], None]
 
 # 这些状态说明"这一篇没处理成"，值得重试一次
-_RETRYABLE = {"no-button", "no-window", "click-failed", "no-list", "no-change"}
+_RETRYABLE = {
+    "no-button",
+    "no-window",
+    "click-failed",
+    "no-list",
+    "no-change",
+    "no-webview",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -547,123 +554,128 @@ class LikeEngine:
     async def collect_list_articles(
         self, timeout: Optional[float] = None, stop_before=None
     ) -> List[Dict[str, Any]]:
-        """把频道列表滚到底，返回全部文章（标题 + 发布日期）。
+        """把频道列表加载完，返回全部文章（标题 + 链接 + 发布日期）。
 
-        列表页是 **无限滚动** 的：实测【新闻资讯】有 200 篇，而首屏只渲染
-        10 篇，不往下滚就会漏掉绝大部分文章。
+        列表页是**无限滚动**的：一屏只有 10 篇，不往下加载就会漏掉绝大部分。
 
-        stop_before 传一个日期时，滚到比它还早的文章就停下——用户设了
-        "从某天开始"的话，没必要把几百篇全加载出来。
+        关键是数据从哪拿：页面的 Vuex store 里 `cardArticleList[].list`
+        直接放着每篇文章的完整对象，**带 url（里面有数字 id）、title、
+        publishTime**。所以这里一边驱动页面加载、一边把 store 里的文章收下来，
+        拿到链接之后就不用再"点开文章窗口"了——不开窗口就没有僵尸页面。
+
+        两个坑：
+          1. 列表容器贴底之后再设同样的 scrollTop 不产生滚动事件，页面就不加载了
+             —— 所以每轮都主动调一次它自己的加载方法；
+          2. 页面自己的加载一旦失败，`isLoading` 会永久卡在 true、列表彻底卡死
+             —— 所以检测到卡住就手动解开再触发一次。
+
+        stop_before 传一个日期时，加载到比它还早的文章就停下。
         """
-        items_js = (
-            "(() => Array.from(document.querySelectorAll('.article-item')).map((item) => {\n"
-            "  const t = item.querySelector('.article-title');\n"
-            "  const intro = item.querySelector('.article-intro');\n"
-            "  const img = item.querySelector('.img-container');\n"
-            "  let dateText = '';\n"
-            "  if (intro) { const sp = intro.querySelectorAll('span');\n"
-            "    if (sp.length) dateText = (sp[sp.length - 1].innerText || '').trim(); }\n"
-            "  return { title: t ? (t.innerText || '').trim() : '', dateText: dateText,\n"
-            "           image: img ? (img.getAttribute('style') || '') : '' };\n"
-            "}).filter((x) => x.title))()"
-        )
-        # 把最后一个条目滚进视野，并顺手把内部滚动容器拉到底
-        scroll_js = (
+        read_js = (
             "(() => {\n"
-            "  const items = document.querySelectorAll('.article-item');\n"
-            "  if (items.length) items[items.length - 1].scrollIntoView({ block: 'end' });\n"
+            "  let node = document.querySelector('.article-item'), vm = null, store = null;\n"
+            "  for (let i = 0; i < 25 && node; i += 1, node = node.parentElement) {\n"
+            "    const v = node.__vue__;\n"
+            "    if (v && v.$store) {\n"
+            "      store = v.$store;\n"
+            "      if (v.$options && v.$options.name === 'List') vm = v;\n"
+            "      if (vm) break;\n"
+            "    }\n"
+            "  }\n"
+            "  if (!store) return { ok: false };\n"
+            "  const items = [];\n"
+            "  for (const tab of (store.state.cardArticleList || [])) {\n"
+            "    for (const it of (tab.list || [])) {\n"
+            "      if (it && it.url) items.push({ url: it.url, title: it.title || '',\n"
+            "        time: it.publishTime || '', thumb: it.thumburl || '' });\n"
+            "    }\n"
+            "  }\n"
+            "  return { ok: true, items: items,\n"
+            "           isLoading: vm ? !!vm.isLoading : null,\n"
+            "           isEnd: vm ? !!vm.isEnd : null };\n"
+            "})()"
+        )
+        drive_js = (
+            "(() => {\n"
+            "  let node = document.querySelector('.article-item'), vm = null;\n"
+            "  for (let i = 0; i < 25 && node; i += 1, node = node.parentElement) {\n"
+            "    const v = node.__vue__;\n"
+            "    if (v && v.$options && v.$options.name === 'List') { vm = v; break; }\n"
+            "  }\n"
+            "  if (!vm) return 'no-vm';\n"
+            "  const stuck = !!vm.isLoading;\n"
+            "  if (stuck) vm.isLoading = false;\n"
+            "  try { vm._getArticleList(); } catch (e) {}\n"
             "  for (const el of document.querySelectorAll('*')) {\n"
             "    if (el.scrollHeight > el.clientHeight + 40 && el.clientHeight > 120 &&\n"
             "        el.querySelector && el.querySelector('.article-item')) {\n"
             "      el.scrollTop = el.scrollHeight;\n"
             "    }\n"
             "  }\n"
-            "  return document.querySelectorAll('.article-item').length;\n"
+            "  return stuck ? 'unstuck' : 'ok';\n"
             "})()"
         )
 
         timeout = timeout or self.cfg.list_load_timeout
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
-        raw: List[Dict[str, Any]] = []
-        last = -1
-        stable = 0
-
-        # 列表组件自己知道"是不是到底了"（$data.isEnd）和"正在不在加载"
-        # （$data.isLoading）。用它比"猜等多久没变化"准得多，也快得多。
-        state_js = (
-            "(() => {\n"
-            "  const count = document.querySelectorAll('.article-item').length;\n"
-            "  let node = document.querySelector('.article-item');\n"
-            "  let isEnd = null, isLoading = null;\n"
-            "  for (let i = 0; i < 15 && node; i += 1, node = node.parentElement) {\n"
-            "    const vm = node.__vue__;\n"
-            "    if (vm && vm.$data && 'isEnd' in vm.$data) {\n"
-            "      isEnd = !!vm.$data.isEnd; isLoading = !!vm.$data.isLoading; break;\n"
-            "    }\n"
-            "  }\n"
-            "  return { count, isEnd, isLoading };\n"
-            "})()"
-        )
+        collected: Dict[str, Dict[str, Any]] = {}
+        stale = 0
 
         while loop.time() < deadline and not self._stop():
             target = self.find_webview(self.cfg.list_host)
             if target is None:
-                await asyncio.sleep(self.cfg.list_scroll_interval)
-                continue
+                # 处理阶段会把列表页导航走，那时就没有它了
+                break
             try:
-                raw = await self._eval(target, items_js) or []
-                info = await self._eval(target, state_js) or {}
+                info = await self._eval(target, read_js) or {}
             except CDPError:
                 await asyncio.sleep(self.cfg.list_scroll_interval)
                 continue
+            if not info.get("ok"):
+                await asyncio.sleep(self.cfg.list_scroll_interval)
+                continue
 
-            if raw:
-                count = info.get("count") or len(raw)
-                if info.get("isEnd"):
-                    break  # 页面说已经到底了，收工
+            before = len(collected)
+            for item in info.get("items") or []:
+                url = item.get("url")
+                if url and url not in collected:
+                    collected[url] = item
+            stale = 0 if len(collected) > before else stale + 1
 
-                # 已经滚过用户要的起始日期，再往下都是不要的
-                if stop_before is not None:
-                    tail = raw[-10:]
-                    days = [
-                        d
-                        for d in (
-                            parse_article_date(i.get("image", ""), i.get("dateText", ""))
-                            for i in tail
-                        )
-                        if d is not None
-                    ]
-                    if days and min(days) < stop_before:
-                        break
+            if info.get("isEnd"):
+                break
+            if stop_before is not None:
+                days = [
+                    d
+                    for d in (
+                        parse_user_date((v.get("time") or "")[:10])
+                        for v in collected.values()
+                    )
+                    if d is not None
+                ]
+                if days and min(days) < stop_before:
+                    break
+            if len(collected) >= 5000 or stale >= self.cfg.list_scroll_stable:
+                break
 
-                # 兜底：连续几轮数量不再增长就认为到底了
-                if count == last:
-                    stable += 1
-                    if stable >= self.cfg.list_scroll_stable:
-                        break
-                else:
-                    stable = 0
-                    last = count
-                    if count >= 5000:
-                        break
-
-                # 每轮都往下滚，不去管它是不是还在加载——滚动才是触发加载的动作
-                try:
-                    await self._eval(target, scroll_js)
-                except CDPError:
-                    pass
-
+            try:
+                await self._eval(target, drive_js)
+            except CDPError:
+                pass
             await asyncio.sleep(self.cfg.list_scroll_interval)
 
         articles: List[Dict[str, Any]] = []
-        for item in raw:
+        for item in collected.values():
+            day = parse_user_date((item.get("time") or "")[:10])
+            if day is None:
+                # 没有 publishTime 就退回从缩略图地址里推断
+                day = parse_article_date(item.get("thumb", ""), "")
             articles.append(
                 {
                     "title": item.get("title", ""),
-                    "date": parse_article_date(
-                        item.get("image", ""), item.get("dateText", "")
-                    ),
+                    "url": item.get("url", ""),
+                    "date": day,
                 }
             )
         return articles
@@ -1077,6 +1089,195 @@ class LikeEngine:
     # ------------------------------------------------------------------
     # 总入口
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 接口批量模式
+    #
+    # 登录之后，新闻站的接口是可以直接用的：
+    #   GET  /article/detail?id=     读状态（is_digg / digg_count）
+    #   POST /article/addDigg        点赞
+    #   POST /article/cancelDigg     取消赞
+    # 所以根本不用逐个打开文章页面——既快（每篇几百毫秒），也不会产生僵尸页面。
+    # 前提是拿得到文章的数字 id，这个从列表页 Vuex store 里的 url 就能取到。
+    # ------------------------------------------------------------------
+    def _article_id(self, url: str) -> Optional[str]:
+        if not url or "id=" not in url:
+            return None
+        return url.split("id=", 1)[1].split("&", 1)[0]
+
+    async def ensure_api_runner(self, articles: List[Dict[str, Any]]):
+        """找一个 tbeanews 域下的页面，用来在它的上下文里发接口请求。
+
+        必须是同域的页面，否则 fetch 会被 CORS 拦掉。
+        """
+        runner = self.find_webview("tbeanews.tbea.com")
+        if runner is not None:
+            return runner
+        # 列表页是 ejia.tbea.com，跨域用不了；把已经不需要的列表页导航过去
+        view = self.find_webview(self.cfg.list_host)
+        target_url = ""
+        for item in articles:
+            if item.get("url"):
+                target_url = item["url"]
+                break
+        if view is None or not target_url:
+            return None
+        try:
+            async with CDPSession(view["webSocketDebuggerUrl"], timeout=25) as s:
+                await s.navigate(target_url)
+        except CDPError:
+            pass
+        # 导航完目标会重建，而且要等页面真的能跑 JS 才算就绪
+        for _ in range(30):
+            await asyncio.sleep(1.0)
+            runner = self.find_webview("tbeanews.tbea.com")
+            if runner is None:
+                continue
+            try:
+                if await self._eval(runner, "1 + 1") == 2:
+                    return runner
+            except CDPError:
+                continue
+        return None
+
+    def _api_batch_js(self, ids: List[str], do_like: bool) -> str:
+        return (
+            "((async (ids, doLike, base) => {\n"
+            "  const out = [];\n"
+            "  const form = (id) => ({method: 'POST', credentials: 'include',\n"
+            "    headers: {'Content-Type': 'application/x-www-form-urlencoded'},\n"
+            "    body: new URLSearchParams({id: id}).toString()});\n"
+            "  const readOne = async (id) => {\n"
+            "    try {\n"
+            "      const r = await fetch(base + '/article/detail?id=' + encodeURIComponent(id),\n"
+            "                            {credentials: 'include'});\n"
+            "      const j = await r.json();\n"
+            "      return (j && j.data)\n"
+            "        ? {id: id, liked: !!j.data.is_digg, count: j.data.digg_count}\n"
+            "        : {id: id, bad: true};\n"
+            "    } catch (e) { return {id: id, bad: true}; }\n"
+            "  };\n"
+            "  // 并行读，别一个个等——页面在后台时单个请求会被拖到一百多毫秒\n"
+            "  const states = await Promise.all(ids.map(readOne));\n"
+            "  const todo = [];\n"
+            "  for (const s of states) {\n"
+            "    if (s.bad) { out.push({id: s.id, status: 'read-failed'}); continue; }\n"
+            "    if (s.liked) { out.push({id: s.id, status: 'already-liked'}); continue; }\n"
+            "    if (!doLike) { out.push({id: s.id, status: 'dry-run', count: s.count}); continue; }\n"
+            "    todo.push(s);\n"
+            "  }\n"
+            "  if (todo.length) {\n"
+            "    const acted = await Promise.all(todo.map(async (s) => {\n"
+            "      try {\n"
+            "        const r = await fetch(base + '/article/addDigg', form(s.id));\n"
+            "        const j = await r.json();\n"
+            "        return {s: s, ok: !!(j && j.code === 1)};\n"
+            "      } catch (e) { return {s: s, ok: false}; }\n"
+            "    }));\n"
+            "    const okOnes = acted.filter((a) => a.ok);\n"
+            "    const fresh = await Promise.all(okOnes.map((a) => readOne(a.s.id)));\n"
+            "    const byId = {};\n"
+            "    for (const f of fresh) byId[f.id] = f;\n"
+            "    for (const a of acted) {\n"
+            "      if (!a.ok) {\n"
+            "        out.push({id: a.s.id, status: 'like-failed', count: a.s.count});\n"
+            "        continue;\n"
+            "      }\n"
+            "      // 接口已经返回成功就算成功；复查只是尽量把新计数带上\n"
+            "      const f = byId[a.s.id];\n"
+            "      out.push({id: a.s.id, status: 'liked', before: a.s.count,\n"
+            "                after: (f && !f.bad) ? f.count : a.s.count + 1});\n"
+            "    }\n"
+            "  }\n"
+            "  return out;\n"
+            "})("
+            + json.dumps(ids, ensure_ascii=False)
+            + ", "
+            + ("true" if do_like else "false")
+            + ", "
+            + json.dumps(self.cfg.api_base)
+            + "))"
+        )
+
+    def _api_status_text(self, row: Dict[str, Any]) -> str:
+        status = row.get("status")
+        if status == "already-liked":
+            return "already-liked"
+        if status == "dry-run":
+            return f"dry-run(count={row.get('count')})"
+        if status == "liked":
+            return f"liked({row.get('before')}->{row.get('after')})"
+        if status == "no-change":
+            return "no-change"
+        if status == "like-failed":
+            return "like-failed"
+        return status or "unknown"
+
+    async def process_articles_via_api(
+        self, articles: List[Dict[str, Any]], result: "SectionResult"
+    ) -> bool:
+        """走接口把这批文章处理完。返回 True 表示这条路走通了。"""
+        plan = []
+        for item in articles:
+            aid = self._article_id(item.get("url", ""))
+            if aid:
+                plan.append((aid, item))
+        if not plan:
+            return False
+
+        runner = await self.ensure_api_runner(articles)
+        if runner is None:
+            self.log("  找不到可用的新闻站页面，改用打开文章的方式")
+            return False
+
+        self.log(f"  接口模式：{len(plan)} 篇，每批 {self.cfg.api_batch_size} 个")
+        try:
+            async with CDPSession(runner["webSocketDebuggerUrl"], timeout=20) as s:
+                await s.send("Page.bringToFront")
+        except CDPError:
+            pass
+        total = len(plan)
+        done = 0
+        size = max(1, self.cfg.api_batch_size)
+        start = 0
+        retries = 0
+        while start < total:
+            if self._stop():
+                self.log("  已手动停止")
+                return True
+            chunk = plan[start : start + size]
+            ids = [aid for aid, _ in chunk]
+            rows = None
+            try:
+                rows = await self._eval(
+                    runner, self._api_batch_js(ids, not self.dry_run)
+                )
+            except CDPError:
+                # 页面可能被重建了，重新找一下再重试同一批
+                runner = self.find_webview("tbeanews.tbea.com")
+                retries += 1
+                if runner is None or retries > 3:
+                    self.log("  接口调用连续失败，改用打开文章的方式")
+                    return False
+                await asyncio.sleep(1.0)
+                continue  # 不推进 start，重试同一批
+            retries = 0
+            if not isinstance(rows, list) or len(rows) != len(ids):
+                self.log("  接口返回的数据不完整，改用打开文章的方式")
+                return False
+            by_id = {r.get("id"): r for r in rows if isinstance(r, dict)}
+            for aid, item in chunk:
+                row = by_id.get(aid)
+                status = self._api_status_text(row) if row else "read-failed"
+                result.stats[status] = result.stats.get(status, 0) + 1
+                done += 1
+                day = item.get("date")
+                stamp = f"{day:%m-%d} " if day else "      "
+                self.log(
+                    f"  [{done}/{total}] {stamp}{status:<24} {item.get('title', '')[:30]}"
+                )
+            start += size
+        return True
+
     def date_range(self):
         """返回配置里的 (起, 止)，没配就是 None。"""
         return (
@@ -1174,6 +1375,11 @@ class LikeEngine:
         if limit:
             articles = articles[:limit]
 
+        # 接口模式：登录之后直接调新闻站接口，不开文章页面、不产生僵尸页面
+        if self.cfg.api_mode and await self.process_articles_via_api(articles, result):
+            self.log(f"  小结：{_fmt(result.stats)}")
+            return result
+
         total = len(articles)
         done: set = set()
         processed = 0
@@ -1187,15 +1393,26 @@ class LikeEngine:
             if item["title"] in done:
                 continue
 
-            status = await self.like_from_list(item["title"])
+            # 有链接就直接用一个 webview 导航过去（不开窗口、不堆僵尸页）；
+            # 拿不到链接才退回"点开文章窗口"的老办法
+            has_url = bool(item.get("url"))
+            status = (
+                await self.process_article_url(item["url"])
+                if has_url
+                else await self.like_from_list(item["title"])
+            )
             if status in _RETRYABLE:
                 # 偶尔会遇到文章窗口开得慢 / 页面还没渲染好，重试一次
                 await asyncio.sleep(2)
-                if status == "no-list":
+                if has_url:
+                    retry = await self.process_article_url(item["url"])
+                elif status == "no-list":
                     # 频道列表页被关掉了，重新打开再试
                     if await self.open_channel(card_name) is not None:
                         await asyncio.sleep(5)
-                retry = await self.like_from_list(item["title"])
+                    retry = await self.like_from_list(item["title"])
+                else:
+                    retry = await self.like_from_list(item["title"])
                 if retry not in _RETRYABLE:
                     status = retry
                 else:
@@ -1258,6 +1475,10 @@ class LikeEngine:
         result.total = len(articles)
         if limit:
             articles = articles[:limit]
+
+        if self.cfg.api_mode and await self.process_articles_via_api(articles, result):
+            self.log(f"  小结：{_fmt(result.stats)}")
+            return result
 
         for i, item in enumerate(articles, 1):
             if self._stop():

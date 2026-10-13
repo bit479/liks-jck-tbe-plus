@@ -93,6 +93,13 @@ DEFAULTS: Dict[str, Any] = {
     # 客户端每打开一篇文章就新建一个 webview 且从不回收，跑多了会拖慢甚至超时。
     # 每处理 N 篇重启一次客户端把它清零；0 = 不重启。
     "restart_every_n_articles": 60,
+
+    # ---------------- 接口批量模式 ----------------
+    # 登录之后可以直接调新闻站的接口读写点赞状态，不用逐个打开文章页面。
+    # 每批处理多少个（批越大往返越少，但单个请求体越大）。
+    "api_mode": True,
+    "api_batch_size": 20,
+    "api_base": "https://tbeanews.tbea.com/api",
 }
 
 
@@ -139,6 +146,9 @@ class Config:
     poll_interval: float = 0.4
     min_delay_between_likes: float = 0.0
     restart_every_n_articles: int = 60
+    api_mode: bool = True
+    api_batch_size: int = 20
+    api_base: str = "https://tbeanews.tbea.com/api"
 
     # ------------------------------------------------------------------
     @property
