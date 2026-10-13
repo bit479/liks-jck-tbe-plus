@@ -100,8 +100,9 @@ async def main() -> int:
         cfg.restart_every_n_articles = args.restart_every
     if args.no_api:
         cfg.api_mode = False
-    if args.read_state or args.verify:
+    if args.read_state or args.verify or args.dry_run:
         # --verify 隐含要先查状态，否则只能得到"复查到已赞"这一个结论
+        # --dry-run 也必须查，不然它只能说"每篇都会去点赞"，等于没试运行
         cfg.api_read_state = True
     if args.verify:
         cfg.api_verify = True

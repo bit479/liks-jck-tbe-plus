@@ -38,6 +38,9 @@ _RETRYABLE = {
     "no-webview",
 }
 
+# 接口模式里这几种原始状态都算"这一篇没落下"
+_API_OK = {"liked", "liked-unconfirmed", "already-liked", "dry-run"}
+
 
 # ---------------------------------------------------------------------------
 # 日期解析
@@ -580,7 +583,11 @@ class LikeEngine:
              **中间那一页 10 篇就永远跳过了**。这就是"漏识别"的真正原因。
 
         所以这里改成直接调 store 的 action，自己指定 pageIndex 一页页拉：
-        不依赖滚动、不依赖 isLoading、也不会有重复请求。
+        不依赖滚动、不依赖 isLoading。
+
+        还有个坑：列表页渲染出第一屏之后会偷懒，**大约 5 秒后才自己去加载下一页**
+        （实测开讲了 15 篇：第 0~4.5 秒一直是 10 篇，第 5 秒才开始加载、5.5 秒变成 15 篇）。
+        所以判断"这页没有了"之前必须先确认列表真的安静了，否则会漏掉整整一页。
         """
         payload = json.dumps(
             {
@@ -608,31 +615,37 @@ class LikeEngine:
   if (!tab) return { ok: false, reason: 'no-tab' };
 
   const pages = [];
-  const requested = {};
   let strikes = 0;
   let guard = 0;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  // 等页面自己的请求落地：它和我们可能同时想拉同一页，
-  // 而同一个 pageIndex 发两次时，服务端第二次会返回 0（看着像"到底了"），
-  // 于是后面那几篇就丢了——所以每次动手前先等它安静下来。
+  // 等页面自己的请求落地：它和我们可能同时在拉同一页
   const settle = async (maxMs) => {
     const t0 = Date.now();
     while (vm.isLoading && Date.now() - t0 < maxMs) await sleep(200);
     await sleep(250);
   };
+  // 判断"这一页真的没有了"之前，必须确认列表是真的不动了。
+  // 实测列表页渲染出第一屏之后，会拖到 5 秒左右才自己去加载下一页
+  // （开讲了 15 篇，第 5 秒才从 10 变 15）。早收工就会漏掉那一页。
+  // 返回 true = 这 quietMs 毫秒内列表一动不动。
+  const waitQuiet = async (quietMs, maxMs) => {
+    const t0 = Date.now();
+    let lastLen = (tab.list || []).length;
+    let quietSince = Date.now();
+    while (Date.now() - t0 < maxMs) {
+      await sleep(300);
+      if ((tab.list || []).length !== lastLen || vm.isLoading) {
+        lastLen = (tab.list || []).length;
+        quietSince = Date.now();
+      }
+      if (Date.now() - quietSince >= quietMs) return true;
+    }
+    return false;
+  };
   while (guard < args.maxPages) {
     guard += 1;
-    await settle(8000);
+    await settle(6000);
     const pageIndex = tab.pageIndex;
-    const attempts = requested[pageIndex] || 0;
-    if (attempts >= 2) {
-      // 同一页连问两次都没动静，基本可以认定到底了
-      strikes += 1;
-      if (strikes >= 2) break;
-      await sleep(800);
-      continue;
-    }
-    requested[pageIndex] = attempts + 1;
     const before = (tab.list || []).length;
     let res = null, err = null;
     try {
@@ -641,16 +654,25 @@ class LikeEngine:
         vm.tabSetting[idx], { pageIndex: pageIndex, pageSize: vm.pageSize, source: 1 }
       ));
     } catch (e) { err = String(e); }
-    await settle(8000);
+    await settle(6000);
     const after = (tab.list || []).length;
     const moved = after > before || tab.pageIndex !== pageIndex;
     pages.push({ pageIndex: pageIndex, grew: after - before, res: res,
                  pageNow: tab.pageIndex });
     if (err) return { ok: false, reason: err, pages: pages };
-    // 返回 0 而且列表一点没动：可能真到底了，也可能是"同一页被问了第二次"
-    // 这类假信号。所以不马上收工，下一轮再试一次同一页，连着两次没动静才停。
-    strikes = moved ? 0 : strikes + 1;
-    if (strikes >= 2) break;
+    if (moved) {
+      strikes = 0;
+    } else {
+      // 返回 0 而且列表一点没动：大概率是到底了，但也可能页面自己正要补下一页。
+      // 先等它安静下来再说；这期间又长出来了就接着往下拉。
+      if (await waitQuiet(3000, 12000)) {
+        // 连续两次"说没有、而且真的半天没动"才算到底
+        strikes += 1;
+        if (strikes >= 2) break;
+      } else {
+        strikes = 0;
+      }
+    }
     if (args.stopBefore) {
       const days = (tab.list || [])
         .map((it) => String(it.publishTime || '').slice(0, 10))
@@ -1580,11 +1602,12 @@ class LikeEngine:
                 failed_here: Dict[str, int] = {}
                 for aid, item in chunk:
                     row = by_id.get(aid)
+                    # 判断成败要看接口回来的**原始状态**，不能拿展示用的文字去比：
+                    # dry-run 的展示文字是 "dry-run(count=12)"，拿它跟 "dry-run" 比
+                    # 永远不相等，于是试运行会被当成整批失败（踩过这个坑）。
+                    raw = row.get("status") if isinstance(row, dict) else None
                     status = self._api_status_text(row) if row else "read-failed"
-                    if status.startswith("liked") or status in (
-                        "already-liked",
-                        "dry-run",
-                    ):
+                    if raw in _API_OK:
                         done_ids[aid] = status
                         day = item.get("date")
                         stamp = f"{day:%m-%d} " if day else "      "
