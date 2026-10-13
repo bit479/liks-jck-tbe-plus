@@ -116,6 +116,13 @@ DEFAULTS: Dict[str, Any] = {
     "api_verify": False,
     # 没成功的文章再重试几轮（每轮之间会刷新接口页面）
     "api_like_rounds": 3,
+    # 用新闻站自己的列表接口枚举（不再是门户那张卡片）。
+    # 门户的 card/getArticleList 最多只给 200 篇，7 月的文章根本翻不到；
+    # 新闻站的 /api/article/lists 没有这个限制（实测 news 有 3286 篇）。
+    "site_api": True,
+    # 一次要多少篇（实测 500 也能返回），以及最多翻多少页兜底
+    "site_page_size": 200,
+    "site_max_pages": 50,
     # 发请求的最高频率（每秒几个）。
     # 实测服务端大约每 60 秒只放行 120 次点赞请求：第 121 次开始整片失败
     # （返回的业务码不是 1），一直失败到下一个时间窗才恢复。
@@ -183,6 +190,9 @@ class Config:
     api_like_rounds: int = 3
     api_rate: float = 1.4
     api_backoff: float = 20.0
+    site_api: bool = True
+    site_page_size: int = 200
+    site_max_pages: int = 50
 
     # ------------------------------------------------------------------
     @property

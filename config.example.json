@@ -43,9 +43,13 @@
   "api_read_state": false,
   "api_verify": false,
   "api_request_timeout": 20.0,
-  "_限速说明": "服务端大约每 60 秒只放行 120 次点赞请求，超了就一直失败到下一个时间窗。api_rate 限制每秒最多发几个请求（1.8 ≈ 108 次/分钟，安全）；api_like_rounds 是失败后重试几轮，api_backoff 是每轮之间等多少秒（成倍递增）。",
-  "api_rate": 1.8,
+  "_限速说明": "服务端大约每 60 秒只放行 120 次点赞请求，超了就一直失败到下一个时间窗。api_rate 限制每秒最多发几个请求（1.4 ≈ 84 次/分钟，还要给翻页留余量）；撞上了会自动降速，api_like_rounds 是失败后重试几轮，api_backoff 是每轮之间等多少秒（成倍递增）。",
+  "api_rate": 1.4,
   "api_like_rounds": 3,
   "api_backoff": 20.0,
-  "list_max_pages": 200
+  "list_max_pages": 200,
+  "_列表来源说明": "true = 用新闻站自己的栏目接口枚举（/api/article/lists?section_code=news）。门户那张卡片的接口（card/getArticleList）最多只给 200 篇，7 月的文章根本翻不到；新闻站接口没这个限制（实测新闻资讯共 3286 篇）。拿不到会自动退回门户卡片方式。",
+  "site_api": true,
+  "site_page_size": 200,
+  "site_max_pages": 50
 }

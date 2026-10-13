@@ -133,6 +133,8 @@ class LikeEngine:
         self.dry_run = dry_run
         self._log = log or (lambda _: None)
         self._stop = stop_flag or (lambda: False)
+        # 新闻站栏目名 → section_code 的缓存（一次运行里查一次就够）
+        self._codes: Optional[Dict[str, str]] = None
 
     # ------------------------------------------------------------------
     # 小工具
@@ -563,6 +565,183 @@ class LikeEngine:
         except CDPError:
             return None
         return await self._wait_for_new_target(before, self.cfg.list_host, timeout)
+
+    # ------------------------------------------------------------------
+    # 新闻站自己的列表接口（推荐路径）
+    #
+    # 门户那张卡片的接口 card/getArticleList **最多只给 200 篇**：
+    # 放大 pageSize（100、200 都试过）、翻到第 21 页以上，全都试了，
+    # 它就是不再给了 —— 所以 7 月的文章在门户里翻不到，只能拿到最近的 200 篇。
+    #
+    # 新闻站自己的接口没有这个限制：
+    #     GET /api/article/lists?section_code=news&page_no=1&page_size=100
+    # 实测 section_code=news 的 count 是 **3286**（门户只给 200），
+    # page_size 给 500 也照收。section_code 从 /api/pc/portal 的栏目名反查：
+    # 新闻资讯=news、开讲了=lecture、要闻=headline。
+    # ------------------------------------------------------------------
+    async def _ensure_site_runner(self) -> Optional[Dict[str, Any]]:
+        """找一个 tbeanews 域下的页面（同域才能发这些请求）。"""
+        runner = self.find_webview(self.cfg.article_host)
+        if runner is not None and await self._looks_alive(runner):
+            return runner
+
+        view = self.find_webview(self.cfg.list_host) or self.find_webview(
+            self.cfg.article_host
+        )
+        if view is None:
+            return None
+        try:
+            async with CDPSession(view["webSocketDebuggerUrl"], timeout=25) as s:
+                await s.navigate(f"https://{self.cfg.article_host}/pc/list")
+        except CDPError:
+            pass
+        for _ in range(30):
+            await asyncio.sleep(1.0)
+            runner = self.find_webview(self.cfg.article_host)
+            if runner is None:
+                continue
+            try:
+                if await self._eval(runner, "1 + 1", timeout=10) == 2:
+                    return runner
+            except CDPError:
+                continue
+        return None
+
+    async def _section_codes(self, runner: Dict[str, Any]) -> Dict[str, str]:
+        """栏目名 → section_code，例如 "新闻资讯" → "news"。"""
+        if self._codes is not None:
+            return self._codes
+        js = (
+            "fetch('/api/pc/portal',{credentials:'include'})"
+            ".then((r)=>r.json()).then((b)=>{const o={};"
+            "const d=(b&&b.data)||{};"
+            "for(const k of Object.keys(d)){const s=d[k]||{};"
+            "if(s.name)o[String(s.name).trim()]=k;}return o;})"
+        )
+        try:
+            got = await self._eval(runner, js, timeout=30)
+        except CDPError:
+            got = None
+        self._codes = got if isinstance(got, dict) else {}
+        return self._codes
+
+    def _site_list_js(
+        self, code: str, stop_before: Optional[date], page_size: int, max_pages: int
+    ) -> str:
+        payload = json.dumps(
+            {
+                "base": f"https://{self.cfg.article_host}/api",
+                "code": code,
+                "stopBefore": stop_before.isoformat() if stop_before else "",
+                "pageSize": max(1, page_size),
+                "maxPages": max(1, max_pages),
+            },
+            ensure_ascii=False,
+        )
+        return (
+            r"""((async (cfg) => {
+  const out = { ok: true, items: [], pages: [], total: null };
+  for (let page = 1; page <= cfg.maxPages; page++) {
+    const url = cfg.base + '/article/lists?section_code=' + encodeURIComponent(cfg.code)
+      + '&page_no=' + page + '&page_size=' + cfg.pageSize;
+    let body = null;
+    try {
+      const r = await fetch(url, { credentials: 'include' });
+      body = await r.json();
+    } catch (e) {
+      out.ok = false; out.reason = 'fetch: ' + String(e); break;
+    }
+    if (!body || (body.code !== 1 && body.code !== 0)) {
+      out.ok = false;
+      out.reason = 'code=' + (body ? body.code : 'null') + ' msg=' + (body ? body.msg : '');
+      break;
+    }
+    const d = body.data || {};
+    const items = d.lists || [];
+    if (out.total === null && typeof d.count !== 'undefined') out.total = d.count;
+    if (!items.length) { out.pages.push({ page: page, got: 0 }); break; }
+    let older = false;
+    for (const it of items) {
+      out.items.push(it);
+      const day = String(it.publish_time || it.create_time || '').slice(0, 10);
+      if (cfg.stopBefore && day && day < cfg.stopBefore) older = true;
+    }
+    const last = items[items.length - 1];
+    out.pages.push({
+      page: page, got: items.length,
+      oldest: String(last.publish_time || last.create_time || '').slice(0, 10)
+    });
+    // 文章是从新到旧排的，翻过起始日期就不用再往下翻了
+    if (older) break;
+    if (out.total !== null && out.items.length >= out.total) break;
+  }
+  return out;
+})("""
+            + payload
+            + "))"
+        )
+
+    async def collect_site_articles(
+        self, card_name: str, stop_before: Optional[date] = None
+    ) -> Optional[List[Dict[str, Any]]]:
+        """用新闻站接口把某个栏目拉全。拿不到就返回 None（调用方退回老办法）。"""
+        runner = await self._ensure_site_runner()
+        if runner is None:
+            self.log("  找不到新闻站页面，改用门户卡片列表")
+            return None
+        codes = await self._section_codes(runner)
+        code = codes.get(card_name.strip())
+        if not code:
+            self.log(f"  新闻站栏目里没有「{card_name}」，改用门户卡片列表")
+            return None
+
+        try:
+            info = await self._eval(
+                runner,
+                self._site_list_js(
+                    code,
+                    stop_before,
+                    self.cfg.site_page_size,
+                    self.cfg.site_max_pages,
+                ),
+                timeout=max(120.0, self.cfg.list_load_timeout),
+            )
+        except CDPError as exc:
+            self.log(f"  新闻站接口没成功（{exc}），改用门户卡片列表")
+            return None
+        if not isinstance(info, dict) or not info.get("ok"):
+            reason = (info or {}).get("reason") if isinstance(info, dict) else None
+            self.log(f"  新闻站接口返回异常（{reason}），改用门户卡片列表")
+            return None
+
+        items = info.get("items") or []
+        self.log(
+            f"  新闻站栏目「{card_name}」(section_code={code})："
+            f"共 {info.get('total')} 篇，本次翻 {len(info.get('pages') or [])} 页取到 {len(items)} 篇"
+        )
+        articles: List[Dict[str, Any]] = []
+        seen: set = set()
+        for it in items:
+            aid = it.get("article_id") or it.get("id")
+            if aid is None:
+                continue
+            aid = str(aid)
+            if aid in seen:
+                continue
+            seen.add(aid)
+            day = parse_user_date(
+                (str(it.get("publish_time") or it.get("create_time") or ""))[:10]
+            )
+            if day is None:
+                day = parse_article_date(str(it.get("image") or ""), "")
+            articles.append(
+                {
+                    "title": it.get("title") or "",
+                    "url": f"https://{self.cfg.article_host}/{self.cfg.article_path}?id={aid}",
+                    "date": day,
+                }
+            )
+        return articles
 
     def _list_js(self, stop_before: Optional[date], max_pages: int) -> str:
         """按页把列表拉全的脚本。
@@ -1730,15 +1909,22 @@ class LikeEngine:
         self.log("")
         self.log("=" * 60)
         self.log(f"板块：{card_name}")
-        opened = await self.open_channel(card_name)
-        if opened is None:
-            self.log("  打不开板块列表页，跳过")
-            result.error = "open-failed"
-            return result
-
-        await asyncio.sleep(5)
         since, _until = self.date_range()
-        articles = await self.collect_list_articles(stop_before=since)
+
+        # 首选：新闻站自己的栏目接口（能翻到很早的文章，门户那张卡片只给 200 篇）
+        articles: List[Dict[str, Any]] = []
+        if self.cfg.site_api:
+            articles = (
+                await self.collect_site_articles(card_name, stop_before=since) or []
+            )
+        if not articles:
+            opened = await self.open_channel(card_name)
+            if opened is None:
+                self.log("  打不开板块列表页，跳过")
+                result.error = "open-failed"
+                return result
+            await asyncio.sleep(5)
+            articles = await self.collect_list_articles(stop_before=since)
         self.log(f"  列表里共 {len(articles)} 篇")
         articles = self.filter_by_date(articles)
         result.total = len(articles)

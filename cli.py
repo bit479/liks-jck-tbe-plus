@@ -176,12 +176,16 @@ async def main() -> int:
             return f"{len(articles)} 篇（{span}{tail}）"
 
         for card in cfg.portal_cards:
-            opened = await engine.open_channel(card)
-            if opened is None:
-                log(f"{card}: 打开失败")
-                continue
-            await asyncio.sleep(7)
-            articles = await engine.collect_list_articles()
+            articles = []
+            if cfg.site_api:
+                articles = await engine.collect_site_articles(card) or []
+            if not articles:
+                opened = await engine.open_channel(card)
+                if opened is None:
+                    log(f"{card}: 打开失败")
+                    continue
+                await asyncio.sleep(7)
+                articles = await engine.collect_list_articles()
             log(f"{card}: {describe(articles)}")
         if cfg.session_channel and not cfg.skip_session_by_default:
             if await engine.switch_to_messages() and await engine.open_session(
