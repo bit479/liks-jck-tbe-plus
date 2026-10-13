@@ -157,6 +157,48 @@ class LikeEngine:
     # 按文案点击（会先滚动到可视区，等布局稳定再重新量坐标）
     # ------------------------------------------------------------------
     async def click_text(self, target: Dict[str, Any], text: str) -> bool:
+        """按文案点击（真实鼠标事件，慢但通用——门户那种场景只能用它）。"""
+        return await self._click_text_mouse(target, text)
+
+    async def click_text_js(self, target: Dict[str, Any], text: str) -> bool:
+        """按文案点击（页面内派发事件）。
+
+        快得多：实测列表页 0.02 秒就能把文章窗口点出来，
+        而真实鼠标事件要等 5 秒——因为点完上一篇之后列表页变成了后台页，
+        得等操作系统把它重新切到前台、布局刷新完才能量到正确坐标。
+        列表页的点击处理器认这种合成事件，所以这里走快路径。
+        """
+        js = (
+            r"""((text) => {
+              let best = null, bd = -1;
+              document.querySelectorAll('*').forEach((el) => {
+                const t = (el.innerText || '').trim();
+                if (!t || t.length > 60 || !t.includes(text)) return;
+                let d = 0, p = el;
+                while (p) { d += 1; p = p.parentElement; }
+                if (d > bd) { bd = d; best = el; }
+              });
+              if (!best) return false;
+              const node = best.closest('a, li, div') || best;
+              const opt = { bubbles: true, cancelable: true, view: window };
+              node.dispatchEvent(new MouseEvent('mousedown', opt));
+              node.dispatchEvent(new MouseEvent('mouseup', opt));
+              node.click();
+              return true;
+            })("""
+            + json.dumps(text, ensure_ascii=False)
+            + ")"
+        )
+        try:
+            async with CDPSession(
+                target["webSocketDebuggerUrl"], timeout=self.cfg.page_timeout
+            ) as s:
+                await s.send("Runtime.enable")
+                return bool(await s.evaluate(js))
+        except CDPError:
+            return False
+
+    async def _click_text_mouse(self, target: Dict[str, Any], text: str) -> bool:
         """按文案点击目标元素。
 
         踩过的坑：打开一篇文章后，列表页会变成后台标签，Chromium 会对它限流，
@@ -192,32 +234,42 @@ class LikeEngine:
               el.scrollIntoView({ block: 'center' });
               const r = el.getBoundingClientRect();
               return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2,
-                       vw: window.innerWidth, vh: window.innerHeight };
+                       vw: window.innerWidth, vh: window.innerHeight,
+                       visible: document.visibilityState === 'visible' };
             })()"""
         )
-        for attempt in range(3):
-            try:
-                async with CDPSession(
-                    target["webSocketDebuggerUrl"], timeout=self.cfg.page_timeout
-                ) as s:
-                    await s.send("Runtime.enable")
-                    try:
-                        # 把它拉回前台，否则后台标签会被限流、坐标算不准
-                        await s.send("Page.bringToFront")
-                    except CDPError:
-                        pass
-                    if not await s.evaluate(mark_js):
-                        return False
-                    await asyncio.sleep(0.6 + attempt * 0.4)
+        loop = asyncio.get_event_loop()
+        try:
+            async with CDPSession(
+                target["webSocketDebuggerUrl"], timeout=self.cfg.page_timeout
+            ) as s:
+                await s.send("Runtime.enable")
+                try:
+                    # 把它拉回前台，否则后台标签会被限流、scrollIntoView 之后
+                    # 量到的还是旧坐标，点击就落空了
+                    await s.send("Page.bringToFront")
+                except CDPError:
+                    pass
+                if not await s.evaluate(mark_js):
+                    return False
+
+                # 拉回前台是异步生效的，这里等"页面可见 + 坐标落在视口内"，
+                # 而不是盲等固定时间再重试
+                deadline = loop.time() + self.cfg.click_wait_timeout
+                while loop.time() < deadline and not self._stop():
                     info = await s.evaluate(rect_js)
-                    if not info or not info.get("found"):
-                        return False
-                    if 0 <= info["x"] <= info["vw"] and 0 <= info["y"] <= info["vh"]:
+                    if (
+                        info
+                        and info.get("found")
+                        and info.get("visible")
+                        and 0 <= info["x"] <= info["vw"]
+                        and 0 <= info["y"] <= info["vh"]
+                    ):
                         await s.click_point(info["x"], info["y"])
                         return True
-            except CDPError:
-                pass
-            await asyncio.sleep(0.8)
+                    await asyncio.sleep(0.2)
+        except CDPError:
+            return False
         return False
 
     # ------------------------------------------------------------------
@@ -338,6 +390,57 @@ class LikeEngine:
     # 门户卡片型板块
     # ------------------------------------------------------------------
     async def warm_up_login(self) -> bool:
+        """登录预热，失败会重试几次。
+
+        客户端刚启动时门户往往还没就绪，第一次很容易失败，
+        所以这里多试几次，而不是一次失败就带着未登录状态硬跑。
+        """
+        if not self.cfg.login_warmup:
+            return True
+
+        # 客户端刚重启时门户页要一会儿才把内容加载出来，
+        # 不等它就直接预热会连试几次都扑空（实测重启后就是这样卡住的）
+        if not await self._wait_portal_ready(self.cfg.portal_ready_timeout):
+            self.log("  门户页一直没准备好，跳过登录预热")
+            return False
+
+        attempts = max(1, self.cfg.warmup_attempts)
+        for attempt in range(1, attempts + 1):
+            if await self._warm_up_login_once():
+                return True
+            if attempt < attempts:
+                self.log(
+                    f"  登录预热第 {attempt} 次没成功，"
+                    f"{self.cfg.warmup_retry_interval:.0f} 秒后重试 …"
+                )
+                await asyncio.sleep(self.cfg.warmup_retry_interval)
+        return False
+
+    async def _wait_portal_ready(self, timeout: float = 60.0) -> bool:
+        """等门户页把新闻卡片渲染出来（重启客户端之后尤其需要）。"""
+        js = (
+            "(() => { const el = document.querySelector("
+            + json.dumps(self.cfg.portal_article_selector)
+            + "); return !!(el && (el.innerText || '').trim()); })()"
+        )
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        waited = 0
+        while loop.time() < deadline and not self._stop():
+            portal = self.find_webview(self.cfg.portal_url_hint)
+            if portal is not None:
+                try:
+                    if await self._eval(portal, js):
+                        return True
+                except CDPError:
+                    pass
+            if waited and waited % 10 == 0:
+                self.log(f"  等门户页加载…{waited}s")
+            await asyncio.sleep(2)
+            waited += 2
+        return False
+
+    async def _warm_up_login_once(self) -> bool:
         """从门户卡片点开一篇文章，让新闻模块完成一次 SSO 登录。
 
         这是唯一可靠的登录入口：实测只有 **门户卡片** 生成的链接会带 SSO
@@ -441,11 +544,16 @@ class LikeEngine:
             return None
         return await self._wait_for_new_target(before, self.cfg.list_host, timeout)
 
-    async def collect_list_articles(self, timeout: Optional[float] = None) -> List[Dict[str, Any]]:
+    async def collect_list_articles(
+        self, timeout: Optional[float] = None, stop_before=None
+    ) -> List[Dict[str, Any]]:
         """把频道列表滚到底，返回全部文章（标题 + 发布日期）。
 
         列表页是 **无限滚动** 的：实测【新闻资讯】有 200 篇，而首屏只渲染
         10 篇，不往下滚就会漏掉绝大部分文章。
+
+        stop_before 传一个日期时，滚到比它还早的文章就停下——用户设了
+        "从某天开始"的话，没必要把几百篇全加载出来。
         """
         items_js = (
             "(() => Array.from(document.querySelectorAll('.article-item')).map((item) => {\n"
@@ -481,34 +589,72 @@ class LikeEngine:
         last = -1
         stable = 0
 
+        # 列表组件自己知道"是不是到底了"（$data.isEnd）和"正在不在加载"
+        # （$data.isLoading）。用它比"猜等多久没变化"准得多，也快得多。
+        state_js = (
+            "(() => {\n"
+            "  const count = document.querySelectorAll('.article-item').length;\n"
+            "  let node = document.querySelector('.article-item');\n"
+            "  let isEnd = null, isLoading = null;\n"
+            "  for (let i = 0; i < 15 && node; i += 1, node = node.parentElement) {\n"
+            "    const vm = node.__vue__;\n"
+            "    if (vm && vm.$data && 'isEnd' in vm.$data) {\n"
+            "      isEnd = !!vm.$data.isEnd; isLoading = !!vm.$data.isLoading; break;\n"
+            "    }\n"
+            "  }\n"
+            "  return { count, isEnd, isLoading };\n"
+            "})()"
+        )
+
         while loop.time() < deadline and not self._stop():
             target = self.find_webview(self.cfg.list_host)
             if target is None:
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(self.cfg.list_scroll_interval)
                 continue
             try:
                 raw = await self._eval(target, items_js) or []
-                if raw:
+                info = await self._eval(target, state_js) or {}
+            except CDPError:
+                await asyncio.sleep(self.cfg.list_scroll_interval)
+                continue
+
+            if raw:
+                count = info.get("count") or len(raw)
+                if info.get("isEnd"):
+                    break  # 页面说已经到底了，收工
+
+                # 已经滚过用户要的起始日期，再往下都是不要的
+                if stop_before is not None:
+                    tail = raw[-10:]
+                    days = [
+                        d
+                        for d in (
+                            parse_article_date(i.get("image", ""), i.get("dateText", ""))
+                            for i in tail
+                        )
+                        if d is not None
+                    ]
+                    if days and min(days) < stop_before:
+                        break
+
+                # 兜底：连续几轮数量不再增长就认为到底了
+                if count == last:
+                    stable += 1
+                    if stable >= self.cfg.list_scroll_stable:
+                        break
+                else:
+                    stable = 0
+                    last = count
+                    if count >= 5000:
+                        break
+
+                # 每轮都往下滚，不去管它是不是还在加载——滚动才是触发加载的动作
+                try:
                     await self._eval(target, scroll_js)
-            except CDPError:
-                await asyncio.sleep(2.0)
-                continue
-            await asyncio.sleep(2.0)
-            try:
-                raw = await self._eval(target, items_js) or raw
-            except CDPError:
-                pass
-            if not raw:
-                continue
-            if len(raw) == last:
-                stable += 1
-                if stable >= self.cfg.list_scroll_stable:
-                    break
-            else:
-                stable = 0
-                last = len(raw)
-            if last >= 5000:
-                break
+                except CDPError:
+                    pass
+
+            await asyncio.sleep(self.cfg.list_scroll_interval)
 
         articles: List[Dict[str, Any]] = []
         for item in raw:
@@ -531,11 +677,21 @@ class LikeEngine:
         if list_target is None:
             return "no-list"
         before = {t.get("id") for t in self.targets()}
-        if not await self.click_text(list_target, title):
-            return "click-failed"
-        article = await self._wait_for_new_target(
-            before, self.cfg.article_webview_hint, timeout=25
-        )
+
+        # 先走快路径：页面内派发点击，通常 0.5 秒内就把文章窗口点出来
+        article = None
+        if await self.click_text_js(list_target, title):
+            article = await self._wait_for_new_target(
+                before, self.cfg.article_webview_hint, timeout=self.cfg.js_click_wait
+            )
+
+        # 快路径没点开就退回真实鼠标点击（慢，但更接近手工操作）
+        if article is None:
+            if not await self._click_text_mouse(list_target, title):
+                return "click-failed"
+            article = await self._wait_for_new_target(
+                before, self.cfg.article_webview_hint, timeout=25
+            )
         if article is None:
             return "no-window"
 
@@ -800,19 +956,17 @@ class LikeEngine:
                 except CDPError:
                     pass
                 await s.click_point(state["x"], state["y"])
-                await asyncio.sleep(self.cfg.wait_after_click)
-                after = await s.evaluate(self._read_praise_js())
-                if after and (
-                    after.get("liked") or after.get("count") != state["count"]
-                ):
-                    return f"liked({state['count']}->{after.get('count')})"
-                # 状态刷新有延迟，再确认一轮
-                await asyncio.sleep(self.cfg.confirm_wait)
-                again = await s.evaluate(self._read_praise_js())
-                if again and (
-                    again.get("liked") or again.get("count") != state["count"]
-                ):
-                    return f"liked({state['count']}->{again.get('count')})"
+                # 轮询等状态变化，一变就返回；不再盲等固定的 4 秒 + 5 秒。
+                # 原来那样既慢，又会在状态刷新稍慢时误判成没点上。
+                before = state.get("count")
+                deadline = asyncio.get_event_loop().time() + self.cfg.verify_timeout
+                while asyncio.get_event_loop().time() < deadline:
+                    await asyncio.sleep(self.cfg.verify_interval)
+                    after = await s.evaluate(self._read_praise_js())
+                    if after and (
+                        after.get("liked") or after.get("count") != before
+                    ):
+                        return f"liked({before}->{after.get('count')})"
                 return "no-change"
         except CDPError:
             return "no-change"
@@ -825,45 +979,98 @@ class LikeEngine:
         实测同一篇文章会有好几个同名 webview：刚新建的那个可能是空的，
         真正渲染好的是另一个，另外还可能有上次遗留的失效页面。
         所以这里把候选全试一遍，谁先渲染出点赞区域就用谁。
+
+        性能上：**复用一条 CDP 会话**。原来每轮轮询都重新建一次连接，
+        建连 + Runtime.enable + bringToFront 的开销比页面本身渲染还大，
+        导致等待时间在 1.6~17 秒之间乱跳。现在只在会话失效时才重连。
         """
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         logged_out_state: Optional[Dict[str, Any]] = None
+        session: Optional[CDPSession] = None
+        session_target_id: Optional[str] = None
+        last_tried: Optional[str] = None
+        polls_on_session = 0
 
-        while loop.time() < deadline and not self._stop():
-            candidates: List[Dict[str, Any]] = []
-            if target_id:
-                preferred = next(
-                    (t for t in self.targets() if t.get("id") == target_id), None
-                )
-                if preferred is not None:
-                    candidates.append(preferred)
-            for t in self.targets():
-                if t.get("type") != "webview" or marker not in (t.get("url") or ""):
-                    continue
-                if any(c.get("id") == t.get("id") for c in candidates):
-                    continue
-                candidates.append(t)
-
-            for current in candidates:
+        async def drop_session() -> None:
+            nonlocal session, session_target_id
+            if session is not None:
                 try:
-                    async with CDPSession(
+                    await session.close()
+                except Exception:
+                    pass
+            session = None
+            session_target_id = None
+
+        try:
+            while loop.time() < deadline and not self._stop():
+                candidates: List[Dict[str, Any]] = []
+                if target_id:
+                    preferred = next(
+                        (t for t in self.targets() if t.get("id") == target_id), None
+                    )
+                    if preferred is not None:
+                        candidates.append(preferred)
+                for t in self.targets():
+                    if t.get("type") != "webview" or marker not in (t.get("url") or ""):
+                        continue
+                    if any(c.get("id") == t.get("id") for c in candidates):
+                        continue
+                    candidates.append(t)
+
+                if not candidates:
+                    await asyncio.sleep(self.cfg.poll_interval)
+                    continue
+
+                # 常驻会话的目标如果已经不在了（页面重载会换 id），就重连；
+                # 同一个目标试了 2 秒多还没渲染出来，就换下一个候选试试
+                # （刚新建的那个常常是空壳，真正渲染好的是另一个）
+                live_ids = {c.get("id") for c in candidates}
+                if session is not None and (
+                    session_target_id not in live_ids or polls_on_session >= 6
+                ):
+                    await drop_session()
+
+                if session is None:
+                    current = next(
+                        (c for c in candidates if c.get("id") != last_tried), candidates[0]
+                    )
+                    session = CDPSession(
                         current["webSocketDebuggerUrl"], timeout=timeout
-                    ) as s:
-                        await s.send("Runtime.enable")
+                    )
+                    try:
+                        await session.connect()
+                        await session.send("Runtime.enable")
                         try:
                             # 文章页也可能是后台标签，拉回前台再读，避免被限流
-                            await s.send("Page.bringToFront")
+                            await session.send("Page.bringToFront")
                         except CDPError:
                             pass
-                        state = await s.evaluate(self._read_praise_js())
+                    except CDPError:
+                        await drop_session()
+                        await asyncio.sleep(self.cfg.poll_interval)
+                        continue
+                    session_target_id = current.get("id")
+                    last_tried = session_target_id
+                    polls_on_session = 0
+
+                try:
+                    state = await session.evaluate(self._read_praise_js())
                 except CDPError:
+                    await drop_session()
+                    await asyncio.sleep(self.cfg.poll_interval)
                     continue
+                polls_on_session += 1
+
                 if state and state.get("found"):
-                    return current.get("id"), state
+                    found_id = session_target_id
+                    await drop_session()
+                    return found_id, state
                 if self._looks_logged_out(state) and logged_out_state is None:
                     logged_out_state = state
-            await asyncio.sleep(self.cfg.poll_interval)
+                await asyncio.sleep(self.cfg.poll_interval)
+        finally:
+            await drop_session()
         # 所有候选都没渲染出点赞区域；如果期间看到过"登录超时"就报它
         return None, logged_out_state
 
@@ -911,6 +1118,42 @@ class LikeEngine:
             self.log(f"  （其中 {unknown} 篇日期没认出来，为保证不漏已照常处理）")
         return kept
 
+    async def _recycle_client(self, card_name: str) -> bool:
+        """重启客户端，清掉它累积的页面，然后重新打开频道。
+
+        客户端每打开一篇文章都会新建一个 webview 且从不回收，跑几百篇会
+        明显拖慢甚至超时。重启是最安全的清理方式（手动删它的 DOM 会把
+        窗口的内部记账弄坏，试过，不行）。
+        """
+        from . import client as client_mod
+
+        exe = client_mod.resolve_client_exe(self.cfg.client_exe_candidates, self.log)
+        if exe is None:
+            self.log("  找不到 TBe.exe，没法重启")
+            return False
+
+        self.log("  重启客户端清理累积的页面（大约 1 分钟）…")
+        preferred = self.cfg.debug_port
+        # 先真的关掉，否则 restart_client 会认为"已经在跑"直接返回
+        client_mod.stop_client(self.log)
+        used = client_mod.restart_client(
+            exe, preferred, self.cfg.restart_wait_seconds, self.log
+        )
+        if not used:
+            return False
+        self.cfg.debug_port = used
+        if used != preferred:
+            client_mod.save_debug_port(used)
+
+        if not await self.warm_up_login():
+            self.log("  重启后登录预热没成功，继续尝试打开频道")
+        if await self.open_channel(card_name) is None:
+            self.log("  重启后没能打开频道列表页")
+            return False
+        await asyncio.sleep(5)
+        self.log("  客户端已重启，继续处理")
+        return True
+
     async def run_section(self, card_name: str, limit: int = 0) -> SectionResult:
         result = SectionResult(name=card_name)
         self.log("")
@@ -922,18 +1165,28 @@ class LikeEngine:
             result.error = "open-failed"
             return result
 
-        await asyncio.sleep(7)
-        articles = await self.collect_list_articles()
+        await asyncio.sleep(5)
+        since, _until = self.date_range()
+        articles = await self.collect_list_articles(stop_before=since)
         self.log(f"  列表里共 {len(articles)} 篇")
         articles = self.filter_by_date(articles)
         result.total = len(articles)
         if limit:
             articles = articles[:limit]
 
-        for i, item in enumerate(articles, 1):
+        total = len(articles)
+        done: set = set()
+        processed = 0
+        idx = 0
+        while idx < len(articles):
             if self._stop():
                 self.log("  已手动停止")
                 break
+            item = articles[idx]
+            idx += 1
+            if item["title"] in done:
+                continue
+
             status = await self.like_from_list(item["title"])
             if status in _RETRYABLE:
                 # 偶尔会遇到文章窗口开得慢 / 页面还没渲染好，重试一次
@@ -941,16 +1194,37 @@ class LikeEngine:
                 if status == "no-list":
                     # 频道列表页被关掉了，重新打开再试
                     if await self.open_channel(card_name) is not None:
-                        await asyncio.sleep(7)
+                        await asyncio.sleep(5)
                 retry = await self.like_from_list(item["title"])
                 if retry not in _RETRYABLE:
                     status = retry
                 else:
                     status = f"{retry}(重试仍失败)"
             result.stats[status] = result.stats.get(status, 0) + 1
+            done.add(item["title"])
+            processed += 1
             day = item.get("date")
             stamp = f"{day:%m-%d} " if day else "      "
-            self.log(f"  [{i}/{len(articles)}] {stamp}{status:<24} {item['title'][:30]}")
+            self.log(f"  [{processed}/{total}] {stamp}{status:<24} {item['title'][:30]}")
+
+            # 客户端每开一篇文章就新建一个 webview 且不回收，跑多了会拖慢甚至超时。
+            # 每处理 N 篇重启一次客户端把它清零，然后重新取列表接着往下做。
+            n = self.cfg.restart_every_n_articles
+            if n and processed % n == 0 and idx < len(articles) and not self._stop():
+                if await self._recycle_client(card_name):
+                    refreshed = self.filter_by_date(
+                        await self.collect_list_articles(stop_before=since)
+                    )
+                    article_pool = [a for a in refreshed if a["title"] not in done]
+                    if limit:
+                        # 重新取列表后也要守住 --max 的上限
+                        article_pool = article_pool[: max(0, limit - processed)]
+                    articles = article_pool
+                    total = processed + len(articles)
+                    idx = 0
+                    self.log(f"  重启后剩余 {len(articles)} 篇待处理")
+                else:
+                    self.log("  重启客户端没成功，继续用当前会话往下做")
 
         current = self.find_webview(self.cfg.list_host)
         if current is not None:

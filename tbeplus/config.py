@@ -62,21 +62,37 @@ DEFAULTS: Dict[str, Any] = {
     # 所以开始干活前先从门户点开一篇文章，让新闻模块完成一次登录；
     # 之后所有直连的文章地址就都正常了。
     "login_warmup": True,
-    "login_warmup_timeout": 40.0,
+    "login_warmup_timeout": 18.0,
+    # 客户端刚启动时门户可能还没就绪，预热失败很正常，多试几次
+    "warmup_attempts": 3,
+    "warmup_retry_interval": 4.0,
+    # 重启客户端后等门户页把新闻卡片渲染出来的最长时间
+    "portal_ready_timeout": 60.0,
 
     # ---------------- 列表翻到底 ----------------
     # 频道列表页是无限滚动的（实测一个频道 70 篇，首屏只有 10 篇），
     # 所以要一直滚到底把所有文章都加载出来再处理。
     "list_scroll_rounds": 60,
-    "list_scroll_stable": 3,
-    "list_load_timeout": 60.0,
+    # 只在取不到 isEnd（页面结构变了）时才用到的兜底判断
+    "list_scroll_stable": 10,
+    "list_load_timeout": 180.0,
+    # 每次滚动后的等待（原来 2 秒，太保守）
+    "list_scroll_interval": 1.2,
 
     # ---------------- 节奏（秒） ----------------
     "page_timeout": 30.0,
-    "wait_after_click": 4.0,
-    "confirm_wait": 5.0,
-    "poll_interval": 1.5,
+    "click_wait_timeout": 6.0,
+    # 走页面内点击后，等文章窗口出现的超时（短一点，不行就退回鼠标点击）
+    "js_click_wait": 3.0,
+    "verify_interval": 0.3,
+    "verify_timeout": 8.0,
+    "poll_interval": 0.4,
     "min_delay_between_likes": 0.0,
+
+    # ---------------- 清理累积的页面 ----------------
+    # 客户端每打开一篇文章就新建一个 webview 且从不回收，跑多了会拖慢甚至超时。
+    # 每处理 N 篇重启一次客户端把它清零；0 = 不重启。
+    "restart_every_n_articles": 60,
 }
 
 
@@ -106,16 +122,23 @@ class Config:
     filter_until: str = ""
 
     login_warmup: bool = True
-    login_warmup_timeout: float = 40.0
+    login_warmup_timeout: float = 18.0
+    warmup_attempts: int = 3
+    warmup_retry_interval: float = 4.0
+    portal_ready_timeout: float = 60.0
     list_scroll_rounds: int = 60
-    list_scroll_stable: int = 3
-    list_load_timeout: float = 60.0
+    list_scroll_stable: int = 10
+    list_load_timeout: float = 180.0
+    list_scroll_interval: float = 1.2
 
     page_timeout: float = 30.0
-    wait_after_click: float = 4.0
-    confirm_wait: float = 5.0
-    poll_interval: float = 1.5
+    click_wait_timeout: float = 6.0
+    js_click_wait: float = 3.0
+    verify_interval: float = 0.3
+    verify_timeout: float = 8.0
+    poll_interval: float = 0.4
     min_delay_between_likes: float = 0.0
+    restart_every_n_articles: int = 60
 
     # ------------------------------------------------------------------
     @property

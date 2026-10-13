@@ -51,6 +51,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--last-days", type=int, metavar="N", help="只处理最近 N 天的新闻（等价于 --since）"
     )
+    parser.add_argument(
+        "--restart-every",
+        type=int,
+        metavar="N",
+        help="每处理 N 篇重启一次客户端，清理它累积的页面（0=不重启）",
+    )
     return parser.parse_args()
 
 
@@ -75,6 +81,8 @@ async def main() -> int:
         cfg.filter_since = since_text
     if args.until:
         cfg.filter_until = args.until
+    if args.restart_every is not None:
+        cfg.restart_every_n_articles = args.restart_every
 
     def log(message: str) -> None:
         print(message, flush=True)

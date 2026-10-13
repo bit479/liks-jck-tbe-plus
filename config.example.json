@@ -23,6 +23,14 @@
   "filter_until": "",
 
   "page_timeout": 30.0,
-  "wait_after_click": 4.0,
-  "confirm_wait": 5.0
+  "_速度相关参数": "一般不用改。点击 / 校验 / 轮询都是自动适配的。",
+  "click_wait_timeout": 6.0,
+  "js_click_wait": 3.0,
+  "verify_interval": 0.3,
+  "verify_timeout": 8.0,
+  "poll_interval": 0.4,
+  "list_scroll_interval": 1.2,
+
+  "_重启清理说明": "客户端每开一篇文章就新建一个页面且不回收，跑多了会拖慢。每处理 N 篇重启一次把它清零；0 = 不重启。",
+  "restart_every_n_articles": 60
 }
