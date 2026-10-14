@@ -108,10 +108,14 @@ DEFAULTS: Dict[str, Any] = {
     "api_request_timeout": 20.0,
     # 一批的 CDP 调用超时（比页面超时长一些）
     "api_batch_timeout": 180.0,
-    # 点赞前是否先查一次文章状态。
-    # 查状态是三个接口里最慢的（平均 2.5 秒），关掉只发点赞请求能快好几倍；
-    # 打开则能在日志里区分"本来就没赞"和"早就赞过"。
-    "api_read_state": False,
+    # 点赞前是否先查一次文章状态。**默认开启**：
+    #   开着 → 能准确区分"新点赞"和"原来就已经赞过"（用户要看的就是这个数）；
+    #   关掉 → 每篇不管有没有赞过都直接发一个点赞请求，快，但只能报
+    #          "已确认点赞 N 篇"，分不清其中多少是本来就已经赞过的。
+    # 代价说明：两种模式每篇都是 1 个请求（一个查状态 / 一个点赞），
+    # 所以"重复跑一次"的速度几乎一样；只有"第一次跑、确实有一堆要新点"时，
+    # 开着查状态会多出一倍请求（查完再点）。
+    "api_read_state": True,
     # 点赞后再查一次，确认服务端状态确实变成已赞（慢，默认关）
     "api_verify": False,
     # 没成功的文章再重试几轮（每轮之间会刷新接口页面）
@@ -185,7 +189,7 @@ class Config:
     api_concurrency: int = 6
     api_request_timeout: float = 20.0
     api_batch_timeout: float = 180.0
-    api_read_state: bool = False
+    api_read_state: bool = True
     api_verify: bool = False
     api_like_rounds: int = 3
     api_rate: float = 1.4

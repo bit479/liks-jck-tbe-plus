@@ -66,7 +66,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--read-state",
         action="store_true",
-        help="点赞前先查一次文章状态（能区分早就赞过的，但每篇多 2 秒左右）",
+        help="点赞前先查一次文章状态（默认就是开的，写了也不冲突）",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="不查历史状态，直接发点赞请求。快，但统计只能报「已确认点赞 N 篇」，"
+        "分不清其中多少本来就赞过",
     )
     parser.add_argument(
         "--verify",
@@ -106,6 +112,8 @@ async def main() -> int:
         # --verify 隐含要先查状态，否则只能得到"复查到已赞"这一个结论
         # --dry-run 也必须查，不然它只能说"每篇都会去点赞"，等于没试运行
         cfg.api_read_state = True
+    if args.fast:
+        cfg.api_read_state = False
     if args.verify:
         cfg.api_verify = True
 

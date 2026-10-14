@@ -95,6 +95,11 @@ class App:
         ttk.Checkbutton(
             row3, text="跳过【进出口公司新闻资讯】", variable=self.skip_session_var
         ).pack(side=LEFT, padx=20)
+        # 默认关：查了状态才能说清"新点赞了几篇/本来就有多少"，这对用户更有用
+        self.fast_var = BooleanVar(value=not self.cfg.api_read_state)
+        ttk.Checkbutton(
+            row3, text="快速模式（不查历史状态）", variable=self.fast_var
+        ).pack(side=LEFT)
 
         # ---- 新闻时间段 ----
         dates = ttk.LabelFrame(self.root, text="新闻时间段（只处理这个区间内的文章）")
@@ -348,6 +353,8 @@ class App:
                 return
         self.cfg.filter_since = since
         self.cfg.filter_until = until
+        # 勾了就只发点赞请求（快，但只能报"已确认点赞"多少篇）
+        self.cfg.api_read_state = not self.fast_var.get()
         if since or until:
             self.log(f"时间段：{since or '不限'} ~ {until or '今天'}")
         else:
@@ -362,8 +369,12 @@ class App:
         results = await engine.run(limit=self.limit_var.get())
         self.log("")
         self.log(summarize(results))
-        if not dry_run:
-            self.log("提示：已点赞的会自动跳过，重复运行不会重复点。")
+        if not dry_run and not self.cfg.api_read_state:
+            self.log(
+                "提示：本次是「快速模式」（不查历史状态），所以只报了"
+                "「已确认点赞」多少篇，分不清其中多少本来就赞过；"
+                "想看准确的新点赞数，把 config.json 里的 api_read_state 改回 true。"
+            )
 
     def _on_stop(self) -> None:
         self.stop_flag.set()

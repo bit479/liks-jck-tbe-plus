@@ -39,7 +39,14 @@ _RETRYABLE = {
 }
 
 # 接口模式里这几种原始状态都算"这一篇没落下"
-_API_OK = {"liked", "liked-unconfirmed", "already-liked", "dry-run"}
+_API_OK = {
+    "liked",              # 查过状态、确认是新点上的
+    "like-unconfirmed",   # 点赞已受理，复查没看到状态变化
+    "digg-sent",          # 没查状态（或读不到），点赞请求已被服务端接受
+    "digg-unconfirmed",
+    "already-liked",
+    "dry-run",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -1611,15 +1618,31 @@ class LikeEngine:
   // 不会重复计数（实测 8 篇里 7 篇计数完全不变，is_digg 一直是 true）。
   // 所以默认不查状态，直接点赞：每篇 1 次请求，既快又不容易超时。
   let todo = ids.map((id) => ({ id: id, count: null }));
+  // 状态没读到的：照样把赞发出去（接口幂等），但状态未知，
+  // 不能算进"新点赞"，只能记"已确认点赞"。
+  const blind = [];
 
   // 可选：点赞前先查状态，能区分"本来就没赞"和"早就赞过"，
   // 代价是每篇多一次慢查询。
   if (cfg.read) {
     const states = await runAll(todo, (s, signal) => readOne(s.id, signal));
+    // 详情接口偶尔会超时（实测 400 篇里有 5 篇）。这些先补读一次，
+    // 能读出来就能准确归类；补读还是失败才走"盲点赞"，并如实标成"已确认点赞"。
+    const missed = [];
+    for (let i = 0; i < todo.length; i++) {
+      const s = states[i];
+      if (!s || s.bad) missed.push(i);
+    }
+    if (missed.length) {
+      const again = await runAll(
+        missed.map((i) => todo[i]), (s, signal) => readOne(s.id, signal)
+      );
+      for (let k = 0; k < missed.length; k++) states[missed[k]] = again[k];
+    }
     const kept = [];
     for (let i = 0; i < todo.length; i++) {
       const s = states[i];
-      if (!s || s.bad) { out.push({ id: todo[i].id, status: 'read-failed' }); continue; }
+      if (!s || s.bad) { blind.push(todo[i]); continue; }
       if (s.liked) { out.push({ id: s.id, status: 'already-liked' }); continue; }
       kept.push({ id: s.id, count: s.count });
     }
@@ -1643,11 +1666,32 @@ class LikeEngine:
         for (let i = 0; i < done.length; i++) {
           const f = fresh[i];
           const ok = f && !f.bad && f.liked;
-          out.push({ id: done[i].id, status: ok ? 'liked' : 'liked-unconfirmed',
-                     after: (f && !f.bad) ? f.count : null });
+          const after = (f && !f.bad) ? f.count : null;
+          if (cfg.read) {
+            out.push({ id: done[i].id, status: ok ? 'liked' : 'like-unconfirmed',
+                       after: after });
+          } else {
+            out.push({ id: done[i].id,
+                       status: ok ? 'digg-sent' : 'digg-unconfirmed', after: after });
+          }
         }
       } else {
-        for (const s of done) out.push({ id: s.id, status: 'liked' });
+        // 查过状态的才敢说"新点赞"；没查状态只能报"点赞请求已确认"
+        for (const s of done) {
+          out.push({ id: s.id, status: cfg.read ? 'liked' : 'digg-sent' });
+        }
+      }
+    }
+  }
+
+  if (blind.length) {
+    if (!doLike) {
+      for (const s of blind) out.push({ id: s.id, status: 'read-failed' });
+    } else {
+      const acted = await runAll(blind, (s, signal) => likeOne(s.id, signal));
+      for (let i = 0; i < blind.length; i++) {
+        out.push({ id: blind[i].id,
+                   status: acted[i] === true ? 'digg-sent' : 'like-failed' });
       }
     }
   }
@@ -1659,23 +1703,41 @@ class LikeEngine:
 
 
     def _api_status_text(self, row: Dict[str, Any]) -> str:
+        """给人看的标签（不带括号里的数字）。
+
+        统计用的 key 一律是**接口返回的原始状态名**（见 done_ids），
+        这里只负责显示——两者千万别混用一个字符串，
+        之前就是拿显示文字当 key，结果 `liked(count=123)` 被算成"未成功"。
+        """
         status = row.get("status")
         if status == "already-liked":
-            return "already-liked"
+            return "原本已点赞"
         if status == "dry-run":
-            return f"dry-run(count={row.get('count')})"
+            return "待点赞"
         if status == "liked":
-            after = row.get("after")
-            return f"liked(count={after})" if after is not None else "liked"
-        if status == "liked-unconfirmed":
-            return "liked(未复查到)"
+            return "新点赞"
+        if status in ("like-unconfirmed", "digg-unconfirmed"):
+            return "点赞已受理待复查"
+        if status == "digg-sent":
+            return "已确认点赞"
         if status == "no-change":
-            return "no-change"
+            return "没看到状态变化"
         if status == "like-failed":
-            return "like-failed"
+            return "点赞失败"
         if status == "read-failed":
-            return "read-failed"
+            return "读状态失败"
         return status or "unknown"
+
+    @staticmethod
+    def _api_log_text(row: Dict[str, Any], label: str) -> str:
+        """日志行里带上计数，方便肉眼核对。"""
+        after = row.get("after")
+        count = row.get("count")
+        if row.get("status") in ("liked", "digg-sent") and after is not None:
+            return f"{label}(赞数 {after})"
+        if row.get("status") == "dry-run" and count is not None:
+            return f"{label}(赞数 {count})"
+        return label
 
     async def process_articles_via_api(
         self, articles: List[Dict[str, Any]], result: "SectionResult"
@@ -1787,11 +1849,15 @@ class LikeEngine:
                     raw = row.get("status") if isinstance(row, dict) else None
                     status = self._api_status_text(row) if row else "read-failed"
                     if raw in _API_OK:
-                        done_ids[aid] = status
+                        # 统计用原始状态名，显示用中文标签，别混用
+                        done_ids[aid] = raw
                         day = item.get("date")
                         stamp = f"{day:%m-%d} " if day else "      "
+                        shown = (
+                            self._api_log_text(row, status) if row else status
+                        )
                         self.log(
-                            f"  [{len(done_ids)}/{len(plan)}] {stamp}{status:<24} "
+                            f"  [{len(done_ids)}/{len(plan)}] {stamp}{shown:<24} "
                             f"{item.get('title', '')[:30]}"
                         )
                     else:
@@ -1935,7 +2001,7 @@ class LikeEngine:
         if self.cfg.api_mode:
             left = await self.process_articles_via_api(articles, result)
             if left is not None and not left:
-                self.log(f"  小结：{_fmt(result.stats)}")
+                self.log(f"  本板块小结：{_fmt(result.stats)}")
                 return result
             if left:
                 self.log(f"  （剩下 {len(left)} 篇改用打开文章的方式）")
@@ -2007,7 +2073,7 @@ class LikeEngine:
         current = self.find_webview(self.cfg.list_host)
         if current is not None:
             await self._close_tab(self.cfg.list_host)
-        self.log(f"  小结：{_fmt(result.stats)}")
+        self.log(f"  本板块小结：{_fmt(result.stats)}")
         return result
 
     async def run_session_section(self, name: str, limit: int = 0) -> SectionResult:
@@ -2040,7 +2106,7 @@ class LikeEngine:
         if self.cfg.api_mode:
             left = await self.process_articles_via_api(articles, result)
             if left is not None and not left:
-                self.log(f"  小结：{_fmt(result.stats)}")
+                self.log(f"  本板块小结：{_fmt(result.stats)}")
                 return result
             if left:
                 self.log(f"  （剩下 {len(left)} 篇改用打开文章的方式）")
@@ -2059,7 +2125,7 @@ class LikeEngine:
             day = item.get("date")
             stamp = f"{day:%m-%d} " if day else "      "
             self.log(f"  [{i}/{len(articles)}] {stamp}{status:<24} {item['title'][:30]}")
-        self.log(f"  小结：{_fmt(result.stats)}")
+        self.log(f"  本板块小结：{_fmt(result.stats)}")
         return result
 
     async def run(self, channels: Optional[List[str]] = None, limit: int = 0) -> List[SectionResult]:
@@ -2088,30 +2154,137 @@ class LikeEngine:
         return results
 
 
+# 状态名 → 中文标签（只用于显示）
+_STATUS_LABEL = {
+    "liked": "新点赞",
+    "already-liked": "原本已点赞",
+    "digg-sent": "已确认点赞",
+    "like-unconfirmed": "点赞已受理待复查",
+    "digg-unconfirmed": "点赞已受理待复查",
+    "dry-run": "待点赞",
+    "like-failed": "点赞失败",
+    "read-failed": "读状态失败",
+    "no-button": "找不到点赞按钮",
+    "no-window": "文章窗口没开出来",
+    "click-failed": "点击失败",
+    "no-list": "列表页不在了",
+    "no-change": "没看到状态变化",
+    "no-webview": "没有可用页面",
+    "need-login": "登录超时",
+    "open-failed": "打不开列表页",
+    "session-empty": "会话里没取到文章",
+    "unknown": "未知结果",
+}
+
+
+def _bucket(key: str) -> str:
+    """把一个状态名归到统计口径里。
+
+    这里只认**原始状态名**，而且必须精确匹配：
+    以前拿"以 liked 开头"当前缀去套，`liked(count=123)` 也会被算成新点赞，
+    后来换成显示文字当 key，又反过来被算成"未成功"——口径自己先乱了两次。
+    """
+    base = key.split("(")[0].strip()
+    if base == "liked":
+        return "liked"          # 查过状态、确认是新点上的
+    if base == "already-liked":
+        return "already"        # 本来就赞过
+    if base == "digg-sent":
+        return "sent"           # 没查状态，只看点赞请求被服务端接受
+    if base in ("like-unconfirmed", "digg-unconfirmed"):
+        return "unclear"        # 点赞受理了，复查没看到
+    if base == "dry-run":
+        return "dry"
+    return "failed"             # 没成 / 状态不明，都归到这里，不能藏
+
+
+def _label(key: str) -> str:
+    base = key.split("(")[0].strip()
+    return _STATUS_LABEL.get(base, base)
+
+
+def _totals(stats: Dict[str, int]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "liked": 0, "already": 0, "sent": 0, "unclear": 0, "dry": 0
+    }
+    failed: Dict[str, int] = {}
+    for key, value in stats.items():
+        where = _bucket(key)
+        if where == "failed":
+            # 按中文标签合并，不然 "no-change" 和 "no-change(重试仍失败)" 会各占一行
+            label = _label(key)
+            failed[label] = failed.get(label, 0) + value
+        else:
+            out[where] += value
+    out["failed"] = sum(failed.values())
+    out["failed_detail"] = failed
+    return out
+
+
 def _fmt(stats: Dict[str, int]) -> str:
     if not stats:
         return "（没有可处理的文章）"
+    t = _totals(stats)
     parts = []
-    liked = sum(v for k, v in stats.items() if k.startswith("liked"))
-    if liked:
-        parts.append(f"新点赞 {liked}")
-    if stats.get("already-liked"):
-        parts.append(f"已点赞 {stats['already-liked']}")
-    other = {k: v for k, v in stats.items() if not k.startswith("liked") and k != "already-liked"}
-    for k, v in other.items():
-        parts.append(f"{k} {v}")
-    return "，".join(parts)
+    if t["liked"]:
+        parts.append(f"新点赞 {t['liked']}")
+    if t["already"]:
+        parts.append(f"原本已点赞 {t['already']}")
+    if t["sent"]:
+        parts.append(f"已确认点赞 {t['sent']}（没查历史状态，不区分是否本来已赞）")
+    if t["unclear"]:
+        parts.append(f"点赞已受理待复查 {t['unclear']}")
+    if t["dry"]:
+        parts.append(f"待点赞 {t['dry']}")
+    if t["failed"]:
+        detail = "，".join(f"{_label(k)} {v}" for k, v in t["failed_detail"].items())
+        parts.append(f"未成功 {t['failed']}（{detail}）")
+    return "，".join(parts) if parts else "（没有可处理的文章）"
 
 
 def summarize(results: List[SectionResult]) -> str:
-    total_liked = sum(r.liked for r in results)
-    total_already = sum(r.already for r in results)
-    lines = [f"全部完成：新点赞 {total_liked} 篇，原本已点赞 {total_already} 篇"]
+    merged: Dict[str, int] = {}
+    for r in results:
+        for key, value in r.stats.items():
+            merged[key] = merged.get(key, 0) + value
+    t = _totals(merged)
+
+    head = []
+    if t["liked"]:
+        head.append(f"新点赞 {t['liked']} 篇")
+    if t["already"]:
+        head.append(f"原本已点赞 {t['already']} 篇")
+    if t["sent"]:
+        head.append(f"已确认点赞 {t['sent']} 篇（没查历史状态，分不清是否本来已赞）")
+    if t["unclear"]:
+        head.append(f"点赞已受理待复查 {t['unclear']} 篇")
+    if t["dry"]:
+        head.append(f"待点赞 {t['dry']} 篇")
+    if t["failed"]:
+        head.append(f"未成功 {t['failed']} 篇")
+
+    lines = ["", "=" * 60, "全部板块合计"]
+    lines.append("  " + ("，".join(head) if head else "没有可处理的文章"))
+    lines.append("-" * 60)
     for r in results:
         if r.error:
-            lines.append(f"  · {r.name}：失败（{r.error}）")
+            lines.append(f"  · {r.name}：处理失败（{r.error}）")
         else:
-            lines.append(f"  · {r.name}：{r.total} 篇 → {_fmt(r.stats)}")
+            processed = sum(r.stats.values())
+            if processed and r.total and processed != r.total:
+                # 用了 --max 之类只处理了一部分时，把"总共多少 / 这次处理多少"写清楚
+                lines.append(
+                    f"  · {r.name}：共 {r.total} 篇，本次处理 {processed} 篇"
+                    f" → {_fmt(r.stats)}"
+                )
+            else:
+                lines.append(f"  · {r.name}：共 {r.total} 篇 → {_fmt(r.stats)}")
+    lines.append("=" * 60)
+    if t["failed"]:
+        lines.append(
+            f"⚠ 有 {t['failed']} 篇没成功（明细见各板块那行），"
+            "可以再跑一次，已经赞过的不会重复点。"
+        )
     if any("need-login" in r.stats for r in results):
         lines.append("")
         lines.append("⚠ 文章页提示「登录超时，请重新登录」，说明 TBe+ 的新闻模块当前没登录。")
