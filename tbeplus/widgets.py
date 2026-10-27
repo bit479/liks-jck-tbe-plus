@@ -1,0 +1,944 @@
+"""自绘控件：全部基于标准库 tkinter 的 Canvas，不引入任何第三方库。
+
+为什么不用 ttk？ttk 在 Windows 上用原生主题绘制，颜色几乎改不动，
+做不出圆角、悬停态和这套浅色卡片。这里用 Canvas 画形状、自己处理
+鼠标事件——代价是代码多几百行，好处是"零依赖"这条承诺还能守住。
+
+控件清单：
+    Panel      圆角卡片（内容放 .body）
+    Btn        按钮：primary / secondary / ghost / danger
+    StatCard   指标卡
+    Bar        进度条
+    Chip       可选中胶囊（板块开关、日志过滤）
+    Switch     开关
+    Stepper    数字步进器
+    NavItem    左侧导航项
+    StatusPill 状态胶囊
+    LogView    日志控制台（按级别上色 + 过滤 + 空状态）
+"""
+
+from __future__ import annotations
+
+import math
+import re
+import tkinter as tk
+import tkinter.font as tkfont
+from tkinter import BOTH, LEFT, RIGHT, Y
+from typing import Callable, Optional
+
+from . import theme as T
+from .theme import C
+
+# 逐条明细里出现的状态词（用来把"状态"和"标题"分成两种颜色）
+DETAIL_LABELS = (
+    "点赞已受理待复查", "新点赞", "已确认点赞", "原本已点赞", "待点赞",
+    "点赞失败", "读状态失败", "没看到状态变化",
+    "liked", "digg-sent", "already-liked", "dry-run", "like-unconfirmed",
+    "digg-unconfirmed", "like-failed", "read-failed", "no-change", "need-login",
+)
+
+_font_cache: dict = {}
+
+
+def measure(spec: tuple, text: str) -> int:
+    key = tuple(spec)
+    fnt = _font_cache.get(key)
+    if fnt is None:
+        fnt = tkfont.Font(font=spec)
+        _font_cache[key] = fnt
+    return fnt.measure(text)
+
+
+# ---------------------------------------------------------------- 形状
+def round_rect(canvas: tk.Canvas, x1, y1, x2, y2, r, **kw):
+    """在画布上画圆角矩形（用多边形逼近圆弧，肉眼看不出折线）。"""
+    r = max(0.0, min(float(r), (x2 - x1) / 2, (y2 - y1) / 2))
+    pts: list[float] = []
+    steps = 6
+    for cx, cy, start in (
+        (x2 - r, y1 + r, -90),
+        (x2 - r, y2 - r, 0),
+        (x1 + r, y2 - r, 90),
+        (x1 + r, y1 + r, 180),
+    ):
+        for i in range(steps + 1):
+            a = math.radians(start + 90 * i / steps)
+            pts.extend((cx + r * math.cos(a), cy + r * math.sin(a)))
+    return canvas.create_polygon(pts, **kw)
+
+
+def blend(color: str, other: str, ratio: float) -> str:
+    """把两个 #RRGGBB 混一混，ratio=0 取 color，1 取 other。"""
+    def parts(c: str) -> tuple:
+        c = c.lstrip("#")
+        return tuple(int(c[i : i + 2], 16) for i in (0, 2, 4))
+
+    a, b = parts(color), parts(other)
+    return "#%02X%02X%02X" % tuple(
+        round(a[i] + (b[i] - a[i]) * ratio) for i in range(3)
+    )
+
+
+# ---------------------------------------------------------------- 卡片
+class Panel(tk.Canvas):
+    """圆角卡片：自己画底，内容放进 .body（一个普通 Frame）。
+
+    子控件在 Tk 里永远浮在 Canvas 绘制物之上，所以"先画圆角底、再摆 Frame"
+    的顺序天然成立，圆角不会被 Frame 的直角盖掉。
+    """
+
+    def __init__(
+        self,
+        master,
+        radius: int = T.RADIUS_CARD,
+        fill: str = C["surface"],
+        stroke: str = C["stroke"],
+        inset: int = 1,
+        bg: Optional[str] = None,
+        **kw,
+    ):
+        # Canvas 默认请求 381x265，会让"自适应高度"的面板把容器撑破
+        kw.setdefault("height", 10)
+        kw.setdefault("width", 10)
+        super().__init__(master, highlightthickness=0, bd=0, bg=bg or C["bg"], **kw)
+        self._radius = radius
+        self._fill = fill
+        self._stroke = stroke
+        self._inset = inset
+        self.body = tk.Frame(self, bg=fill, highlightthickness=0, bd=0)
+        self.bind("<Configure>", self._redraw)
+
+    def fit(self, extra: int = 0) -> None:
+        """按内容高度把自己撑到刚好——卡片高度不写死数字，改文案不会挤破。
+
+        刚 pack 完的子控件要等一轮空闲才把"请求高度"传上来，
+        所以先算一次，再挂一个 after_idle 补算，避免卡片少了十几像素把内容切掉。
+        """
+        self._fit_extra = int(extra)
+        self._fit_apply()
+        if getattr(self, "_fit_job", None) is None:
+            self._fit_job = self.after_idle(self._fit_later)
+
+    def _fit_later(self) -> None:
+        self._fit_job = None
+        if not self.winfo_exists():
+            return
+        self._fit_apply()
+        # 再补一轮：刚重排过的子控件有时要两轮空闲才把请求高度传上来
+        self._fit_job = self.after_idle(self._fit_final)
+
+    def _fit_final(self) -> None:
+        self._fit_job = None
+        if self.winfo_exists():
+            self._fit_apply()
+
+    def _fit_apply(self) -> None:
+        self.update_idletasks()
+        self.configure(
+            height=self.body.winfo_reqheight() + 2 * self._inset
+            + getattr(self, "_fit_extra", 0)
+        )
+
+    def _redraw(self, _event=None) -> None:
+        w, h = self.winfo_width(), self.winfo_height()
+        if w <= 2 or h <= 2:
+            return
+        self.delete("bgshape")
+        round_rect(
+            self, 1, 1, w - 1, h - 1, self._radius,
+            fill=self._fill, outline=self._stroke, width=1, tags="bgshape",
+        )
+        self.tag_lower("bgshape")
+        i = self._inset
+        self.body.place(x=i, y=i, width=w - 2 * i, height=h - 2 * i)
+
+
+# ---------------------------------------------------------------- 按钮
+class Btn(tk.Canvas):
+    """按钮。variant：
+        primary   主操作（蓝底白字）
+        secondary 次要操作（白底细边框）
+        ghost     无边框（工具栏、行内操作）
+        danger    高风险（红字细边框，只用于停止/删除这类操作）
+    """
+
+    PAIRS = {
+        "primary": (C["accent"], C["accent_hi"], C["on_dark"], C["accent"]),
+        "secondary": (C["surface"], C["surface_hi"], C["text"], C["stroke_hi"]),
+        "ghost": (None, C["surface_hi"], C["text2"], None),
+        "danger": (C["surface"], C["err_soft"], C["err"], C["err_line"]),
+    }
+
+    def __init__(
+        self,
+        master,
+        text: str,
+        command: Optional[Callable] = None,
+        variant: str = "primary",
+        icon: str = "",
+        width: Optional[int] = None,
+        height: int = 36,
+        radius: int = T.RADIUS_CTRL,
+        size: int = 10,
+        bold: bool = False,
+        bg: Optional[str] = None,
+        pad: int = 16,
+    ):
+        self._font = T.f(size, bold)
+        self._icon_font = T.icon(size - 1)
+        self._text = text
+        self._icon = icon
+        self._pad = pad
+        self._h = height
+        self._radius = radius
+        self._variant = variant
+        self._state = "normal"
+        self._hover = False
+        self._pressed = False
+        base_bg = bg
+        if base_bg is None:
+            try:
+                base_bg = master.cget("bg")
+            except tk.TclError:
+                base_bg = C["surface"]
+        self._base_bg = base_bg
+        w = width or self._natural_width()
+        self._cw = w
+        super().__init__(
+            master, width=w, height=height, bg=base_bg,
+            highlightthickness=0, bd=0, cursor="hand2", takefocus=1,
+        )
+        self._command = command
+        # 键盘也能用：Tab 聚焦 + 回车/空格触发
+        self.bind("<Return>", lambda _e: self._invoke())
+        self.bind("<space>", lambda _e: self._invoke())
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<FocusIn>", lambda _e: self._draw())
+        self.bind("<FocusOut>", lambda _e: self._draw())
+        self._draw()
+
+    def _natural_width(self) -> int:
+        w = measure(self._font, self._text)
+        if self._icon:
+            w += measure(self._icon_font, self._icon) + 7
+        return w + self._pad * 2
+
+    # -- 对外
+    def set_text(self, text: str, icon: Optional[str] = None) -> None:
+        self._text = text
+        if icon is not None:
+            self._icon = icon
+        self._cw = self._natural_width()
+        self.configure(width=self._cw)
+        self._draw()
+
+    def set_enabled(self, enabled: bool) -> None:
+        self._state = "normal" if enabled else "disabled"
+        self.configure(cursor="hand2" if enabled else "arrow")
+        self._draw()
+
+    # -- 事件
+    def _on_enter(self, _e) -> None:
+        self._hover = True
+        if self._state == "normal":
+            self._draw()
+
+    def _on_leave(self, _e) -> None:
+        self._hover = False
+        self._pressed = False
+        if self._state == "normal":
+            self._draw()
+
+    def _on_press(self, _e) -> None:
+        if self._state != "normal":
+            return
+        self._pressed = True
+        self._draw()
+
+    def _on_release(self, e) -> None:
+        if self._state != "normal":
+            return
+        self._pressed = False
+        self._draw()
+        if 0 <= e.x <= self._cw and 0 <= e.y <= self._h:
+            self._invoke()
+
+    def _invoke(self) -> None:
+        if self._state == "normal" and self._command:
+            self._command()
+
+    # -- 绘制
+    def _draw(self) -> None:
+        self.delete("all")
+        w, h = int(self._cw), self._h
+        base, hover, fg, edge = self.PAIRS.get(self._variant, self.PAIRS["secondary"])
+
+        if base is None:                      # ghost 与容器同色
+            base = self._base_bg
+        fill = hover if (self._hover and self._state == "normal") else base
+        if self._pressed:
+            fill = blend(fill, C["ink"], 0.08)
+        if self._state == "disabled":
+            fill = blend(base, self._base_bg, 0.5)
+            fg = C["text3"]
+            edge = C["stroke"]
+
+        round_rect(
+            self, 1, 1, w - 1, h - 1, self._radius,
+            fill=fill, outline=edge or fill, width=1 if edge else 0,
+        )
+        if self.focus_get() is self:      # 键盘焦点提示
+            round_rect(self, 0, 0, w, h, self._radius + 1,
+                       fill="", outline=C["accent"], width=2)
+
+        total = measure(self._font, self._text)
+        if self._icon:
+            total += measure(self._icon_font, self._icon) + 7
+        x = (w - total) / 2
+        cy = h / 2 + 0.5
+        if self._icon:
+            self.create_text(x, cy, text=self._icon, font=self._icon_font,
+                             fill=fg, anchor="w")
+            x += measure(self._icon_font, self._icon) + 7
+        self.create_text(x, cy, text=self._text, font=self._font, fill=fg,
+                         anchor="w")
+
+
+# ---------------------------------------------------------------- 指标卡
+class StatCard(tk.Canvas):
+    """指标卡：小标题 + 大数字 + 右侧说明。宽度随容器拉伸。"""
+
+    def __init__(
+        self,
+        master,
+        title: str,
+        accent: str = C["accent"],
+        glyph: str = "\uE8A5",
+        unit: str = "篇",
+        note: str = "等待运行",
+    ):
+        super().__init__(master, width=10, height=88, bg=C["bg"],
+                         highlightthickness=0, bd=0)
+        self._title = title
+        self._accent = accent
+        self._glyph = glyph
+        self._unit = unit
+        self._note = note
+        self._value = 0
+        self.bind("<Configure>", lambda _e: self._draw())
+        self.after(30, self._draw)
+
+    def set(self, value: int, note: Optional[str] = None,
+            accent: Optional[str] = None) -> None:
+        self._value = int(value)
+        if note is not None:
+            self._note = note
+        if accent:
+            self._accent = accent
+        self._draw()
+
+    def _draw(self) -> None:
+        w, h = self.winfo_width(), self.winfo_height()
+        if w <= 4 or h <= 4:
+            return
+        self.delete("all")
+        round_rect(self, 1, 1, w - 1, h - 1, T.RADIUS_CARD,
+                   fill=C["surface"], outline=C["stroke"], width=1)
+        # 左侧 3px 强调条：颜色对应指标语义，不抢文字
+        round_rect(self, 1, 18, 4, h - 18, 1.5,
+                   fill=self._accent, outline="", width=0)
+
+        self.create_text(20, 24, text=self._glyph, font=T.icon(9),
+                         fill=self._accent, anchor="w")
+        self.create_text(38, 24, text=self._title, font=T.f(9),
+                         fill=C["text2"], anchor="w")
+
+        num_font = T.f(18, True)
+        label = f"{self._value:,}"
+        self.create_text(20, 58, text=label, font=num_font,
+                         fill=C["text"], anchor="w")
+        nw = measure(num_font, label)
+        self.create_text(24 + nw, 61, text=self._unit, font=T.f(9),
+                         fill=C["text3"], anchor="w")
+        if self._note:
+            self.create_text(w - 16, 60, text=self._note, font=T.f(9),
+                             fill=C["text3"], anchor="e")
+
+
+# ---------------------------------------------------------------- 进度条
+class Bar(tk.Canvas):
+    """细进度条：轨道 + 圆角填充。frac 0~1。"""
+
+    def __init__(self, master, height: int = 6, color: str = C["accent"],
+                 track: str = C["stroke"], bg: Optional[str] = None):
+        # Canvas 默认要 381px 宽，放进 pack(expand) 里会把后面的标签挤出界
+        super().__init__(master, width=8, height=height,
+                         bg=bg or C["surface"], highlightthickness=0, bd=0)
+        self._h = height
+        self._color = color
+        self._track = track
+        self._frac = 0.0
+        self.bind("<Configure>", lambda _e: self._draw())
+
+    def set(self, frac: float) -> None:
+        frac = max(0.0, min(1.0, float(frac)))
+        if abs(frac - self._frac) < 0.002:
+            return
+        self._frac = frac
+        self._draw()
+
+    def set_color(self, color: str) -> None:
+        self._color = color
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        w = self.winfo_width()
+        if w <= 4:
+            return
+        h = self._h
+        r = h / 2
+        round_rect(self, 0, 0, w, h, r, fill=self._track, outline="", width=0)
+        if self._frac > 0:
+            round_rect(self, 0, 0, max(h, w * self._frac), h, r,
+                       fill=self._color, outline="", width=0)
+
+
+# ---------------------------------------------------------------- 胶囊 / 开关
+class Chip(tk.Canvas):
+    """可选中的小胶囊（板块开关、日志过滤）。"""
+
+    def __init__(
+        self,
+        master,
+        text: str,
+        value: bool = False,
+        command: Optional[Callable] = None,
+        height: int = 28,
+        size: int = 9,
+        bg: Optional[str] = None,
+    ):
+        self._text = text
+        self._font = T.f(size)
+        self._value = value
+        self._command = command
+        self._h = height
+        self._hover = False
+        w = measure(self._font, text) + 32
+        super().__init__(master, width=w, height=height,
+                         bg=bg or C["surface"], highlightthickness=0, bd=0,
+                         cursor="hand2")
+        self._cw = w
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.bind("<Button-1>", self._click)
+        self._draw()
+
+    def _set_hover(self, on: bool) -> None:
+        self._hover = on
+        self._draw()
+
+    def _click(self, _e) -> None:
+        self._value = not self._value
+        self._draw()
+        if self._command:
+            self._command()
+
+    def get(self) -> bool:
+        return self._value
+
+    def set(self, value: bool) -> None:
+        self._value = bool(value)
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        w, h = self._cw, self._h
+        if self._value:
+            fill, edge, fg, dot = C["accent_soft"], C["accent_line"], C["accent_hi"], C["accent"]
+        else:
+            fill = C["surface_hover"] if self._hover else C["surface"]
+            edge = C["stroke_hi"] if self._hover else C["stroke"]
+            fg, dot = C["slate"], C["stroke_hi"]
+        round_rect(self, 1, 1, w - 1, h - 1, h / 2,
+                   fill=fill, outline=edge, width=1)
+        self.create_oval(11, h / 2 - 2.5, 16, h / 2 + 2.5, fill=dot, outline="")
+        self.create_text(22, h / 2, text=self._text, font=self._font,
+                         fill=fg, anchor="w")
+
+
+class Switch(tk.Canvas):
+    """滑动开关。"""
+
+    def __init__(
+        self,
+        master,
+        value: bool = False,
+        command: Optional[Callable] = None,
+        bg: Optional[str] = None,
+    ):
+        super().__init__(master, width=38, height=22, bg=bg or C["surface"],
+                         highlightthickness=0, bd=0, cursor="hand2")
+        self._value = bool(value)
+        self._command = command
+        self.bind("<Button-1>", self._click)
+        self._draw()
+
+    def _click(self, _e) -> None:
+        self._value = not self._value
+        self._draw()
+        if self._command:
+            self._command()
+
+    def get(self) -> bool:
+        return self._value
+
+    def set(self, value: bool) -> None:
+        self._value = bool(value)
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        on = self._value
+        track = C["accent"] if on else C["stroke_hi"]
+        round_rect(self, 1, 3, 37, 19, 8, fill=track, outline="", width=0)
+        cx = 29 if on else 9
+        self.create_oval(cx - 7, 4, cx + 7, 18, fill=C["on_dark"],
+                         outline=C["stroke"] if not on else "")
+
+
+class Stepper(tk.Canvas):
+    """数字步进器： −  12  +  """
+
+    def __init__(
+        self,
+        master,
+        value: int = 0,
+        from_: int = 0,
+        to: int = 999,
+        step: int = 1,
+        command: Optional[Callable] = None,
+        width: int = 92,
+        bg: Optional[str] = None,
+    ):
+        super().__init__(master, width=width, height=30, bg=bg or C["surface"],
+                         highlightthickness=0, bd=0)
+        self._value = int(value)
+        self._from, self._to, self._step = from_, to, step
+        self._command = command
+        self._cw = width
+        self._hover_zone = 0
+        self.bind("<Button-1>", self._click)
+        self.bind("<Motion>", self._motion)
+        self.bind("<Leave>", lambda _e: self._set_hover(0))
+        self._draw()
+
+    def get(self) -> int:
+        return self._value
+
+    def set(self, value: int) -> None:
+        self._value = max(self._from, min(self._to, int(value)))
+        self._draw()
+
+    def _zone(self, x: int) -> int:
+        if x < 28:
+            return -1
+        if x > self._cw - 28:
+            return 1
+        return 0
+
+    def _bump(self, delta: int) -> None:
+        new = max(self._from, min(self._to, self._value + delta * self._step))
+        if new != self._value:
+            self._value = new
+            self._draw()
+            if self._command:
+                self._command()
+
+    def _click(self, e) -> None:
+        zone = self._zone(e.x)
+        if zone:
+            self._bump(zone)
+
+    def _set_hover(self, zone: int) -> None:
+        self._hover_zone = zone
+        self.configure(cursor="hand2" if zone else "xterm")
+        self._draw()
+
+    def _motion(self, e) -> None:
+        zone = self._zone(e.x)
+        if zone != self._hover_zone:
+            self._set_hover(zone)
+
+    def _draw(self) -> None:
+        self.delete("all")
+        w, h = self._cw, 30
+        round_rect(self, 1, 1, w - 1, h - 1, T.RADIUS_CTRL,
+                   fill=C["surface"], outline=C["stroke_hi"], width=1)
+        for zone, x, glyph in ((-1, 15, "\uE738"), (1, w - 15, "\uE710")):
+            if self._hover_zone == zone:
+                self.create_oval(x - 10, 5, x + 10, h - 5,
+                                 fill=C["surface_hi"], outline="")
+            self.create_text(x, h / 2, text=glyph, font=T.icon(7),
+                             fill=C["text2"])
+        self.create_text(w / 2, h / 2, text=str(self._value), font=T.f(10, True),
+                         fill=C["text"])
+
+
+# ---------------------------------------------------------------- 导航
+class NavItem(tk.Canvas):
+    """左侧深色导航项：整行高亮 + 左侧强调条。"""
+
+    def __init__(
+        self,
+        master,
+        text: str,
+        glyph: str,
+        command: Optional[Callable] = None,
+        active: bool = False,
+        width: int = T.NAV_W,
+        height: int = 40,
+    ):
+        super().__init__(master, width=width, height=height,
+                         bg=C["nav"], highlightthickness=0, bd=0,
+                         cursor="hand2")
+        self._text = text
+        self._glyph = glyph
+        self._command = command
+        self._active = active
+        self._hover = False
+        self._cw, self._ch = width, height
+        self.bind("<Enter>", lambda _e: self._hover_in(True))
+        self.bind("<Leave>", lambda _e: self._hover_in(False))
+        self.bind("<Button-1>", self._click)
+        self._draw()
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        self._draw()
+
+    def _hover_in(self, on: bool) -> None:
+        self._hover = on
+        self._draw()
+
+    def _click(self, _e) -> None:
+        if self._command:
+            self._command()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        w, h = self._cw, self._ch
+        if self._active:
+            round_rect(self, 0, 2, w, h - 2, 8, fill=C["nav_active"],
+                       outline="", width=0)
+            round_rect(self, 0, 12, 3, h - 12, 1.5, fill=C["nav_accent"],
+                       outline="", width=0)
+            fg, icon_fg = C["on_dark"], C["nav_accent"]
+        elif self._hover:
+            round_rect(self, 0, 2, w, h - 2, 8, fill=C["nav_hover"],
+                       outline="", width=0)
+            fg, icon_fg = C["nav_text"], C["nav_muted"]
+        else:
+            fg, icon_fg = C["nav_muted"], C["nav_icon"]
+        self.create_text(20, h / 2, text=self._glyph, font=T.icon(11), fill=icon_fg)
+        self.create_text(42, h / 2, text=self._text,
+                         font=T.f(10, self._active), fill=fg, anchor="w")
+
+
+class StatusPill(tk.Canvas):
+    """状态胶囊：● 空闲 / ● 运行中。"""
+
+    TONES = {
+        "idle": (C["text3"], C["surface_hi"], C["text2"]),
+        "run": (C["accent"], C["accent_soft"], C["accent_hi"]),
+        "ok": (C["ok"], C["ok_soft"], C["ok_deep"]),
+        "warn": (C["warn"], C["warn_soft"], C["warn_deep"]),
+        "err": (C["err"], C["err_soft"], C["err_deep"]),
+    }
+
+    def __init__(self, master, text: str = "空闲", tone: str = "idle",
+                 bg: Optional[str] = None):
+        super().__init__(master, width=90, height=26, bg=bg or C["bg"],
+                         highlightthickness=0, bd=0)
+        self._text = text
+        self._tone = tone
+        self._cw = measure(T.f(9), text) + 34
+        self.configure(width=self._cw)
+        self._draw()
+
+    def set(self, text: str, tone: str = "idle") -> None:
+        self._text = text
+        self._tone = tone
+        self._cw = measure(T.f(9), text) + 34
+        self.configure(width=self._cw)
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        w, h = int(self._cw), 26
+        dot, fill, fg = self.TONES.get(self._tone, self.TONES["idle"])
+        round_rect(self, 1, 1, w - 1, h - 1, h / 2, fill=fill,
+                   outline=dot if self._tone != "idle" else C["stroke"], width=1)
+        self.create_oval(12, h / 2 - 3, 18, h / 2 + 3, fill=dot, outline="")
+        self.create_text(24, h / 2, text=self._text, font=T.f(9), fill=fg,
+                         anchor="w")
+
+
+# ---------------------------------------------------------------- 滚动条
+class SlimScroll(tk.Canvas):
+    """细滚动条：Windows 原生滚动条改不了颜色，浅色卡片上太扎眼。"""
+
+    def __init__(self, master, target: tk.Text, width: int = 8,
+                 bg: str = C["term"]):
+        super().__init__(master, width=width, bg=bg, highlightthickness=0, bd=0)
+        self._target = target
+        self._first, self._last = 0.0, 1.0
+        self._cw = width
+        self._drag = None
+        self.bind("<Configure>", lambda _e: self._draw())
+        self.bind("<Button-1>", self._press)
+        self.bind("<B1-Motion>", self._move)
+        self.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_drag", None))
+        self._draw()
+
+    def set(self, first, last) -> None:
+        self._first, self._last = float(first), float(last)
+        self._draw()
+
+    def _thumb(self) -> tuple:
+        h = self.winfo_height()
+        if h <= 10:
+            return 0, 0
+        span = self._last - self._first
+        th = max(28, h * span)
+        y = (h - th) * (self._first / max(1e-9, 1 - span)) if span < 1 else 0
+        return y, th
+
+    def _draw(self) -> None:
+        self.delete("all")
+        h = self.winfo_height()
+        if h <= 10:
+            return
+        y, th = self._thumb()
+        round_rect(self, 2, y + 2, self._cw - 2, y + th - 2,
+                   (self._cw - 4) / 2, fill=C["stroke_hi"], outline="", width=0)
+
+    def _press(self, e) -> None:
+        y, th = self._thumb()
+        if y <= e.y <= y + th:
+            self._drag = e.y - y
+        else:
+            self._drag = th / 2
+            self._move(e)
+
+    def _move(self, e) -> None:
+        h = self.winfo_height()
+        _, th = self._thumb()
+        if h - th <= 0:
+            return
+        offset = (e.y - (self._drag or 0)) / (h - th)
+        self._target.yview_moveto(max(0.0, min(1.0, offset)))
+
+
+# ---------------------------------------------------------------- 滚动区
+class ScrollArea(tk.Frame):
+    """可纵向滚动的容器：内容放 .inner。
+
+    窗口高度不够时（笔记本小屏很常见）让内容自己滚，而不是把卡片压扁、
+    把文字切掉。内容装得下时滚动条自动隐藏。
+    """
+
+    def __init__(self, master, bg: str = C["bg"]):
+        super().__init__(master, bg=bg, highlightthickness=0, bd=0)
+        self._bg = bg
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0,
+                                width=10, height=10)
+        self.scroll = SlimScroll(self, self.canvas, bg=bg)
+        self.canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self.scroll.pack(side=RIGHT, fill=Y)
+        self.inner = tk.Frame(self.canvas, bg=bg)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", self._sync)
+        self.canvas.bind("<Configure>", self._on_canvas)
+        self.canvas.configure(yscrollcommand=self.scroll.set)
+        self.bind("<Enter>", lambda _e: self.bind_all("<MouseWheel>", self._wheel))
+        self.bind("<Leave>", lambda _e: self.unbind_all("<MouseWheel>"))
+
+    def _on_canvas(self, event) -> None:
+        self.canvas.itemconfigure(self._win, width=event.width)
+        self._sync()
+
+    def _sync(self, _event=None) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        need = self.inner.winfo_reqheight() > self.canvas.winfo_height() + 2
+        if need and not self.scroll.winfo_ismapped():
+            self.scroll.pack(side=RIGHT, fill=Y)
+        elif not need and self.scroll.winfo_ismapped():
+            self.scroll.pack_forget()
+            self.canvas.yview_moveto(0)
+
+    def refresh(self) -> None:
+        self.after_idle(self._sync)
+
+    def _wheel(self, event) -> str:
+        if self.scroll.winfo_ismapped():
+            self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+
+# ---------------------------------------------------------------- 日志
+class LogView(tk.Frame):
+    """日志控制台：浅底等宽字，按内容上色，支持"只看关键 / 只看问题"。
+
+    没有内容时显示空状态，避免一片空白让人以为界面坏了。
+    """
+
+    LEVELS = {
+        "dim": C["text3"],
+        "text2": C["slate"],
+        "text": C["text"],
+        "accent": C["accent_hi"],
+        "ok": C["ok"],
+        "warn": C["warn"],
+        "err": C["err"],
+        "like": C["accent"],
+    }
+
+    def __init__(self, master, bg: str = C["term"], size: int = 9,
+                 empty_hint: str = "还没有日志。"):
+        super().__init__(master, bg=bg, highlightthickness=0, bd=0)
+        self._bg = bg
+        self.text = tk.Text(
+            self, bg=bg, fg=C["log_text"], font=(T.MONO, size),
+            relief="flat", bd=0, highlightthickness=0, wrap="word",
+            state="disabled", insertwidth=0, padx=14, pady=12, height=6,
+            spacing1=1, spacing3=2, selectbackground=C["accent_soft"],
+            selectforeground=C["text"],
+        )
+        self.scroll = SlimScroll(self, self.text, bg=bg)
+        self.text.pack(side="left", fill="both", expand=True)
+        self.scroll.pack(side="right", fill="y", padx=(0, 4))
+
+        for name, color in self.LEVELS.items():
+            self.text.tag_configure(name, foreground=color)
+        self.text.tag_configure("head", font=(T.MONO, size, "bold"))
+        self.text.tag_configure("detail", elide=False)
+        self.text.tag_configure("quiet", elide=False)
+
+        self.empty = tk.Label(self, text=empty_hint, font=T.f(9),
+                              fg=C["text3"], bg=bg)
+        self.empty.place(relx=0.5, rely=0.5, anchor="center")
+
+        self._autoscroll = True
+        self._has_content = False
+        self._mode = "all"
+        self.text.bind("<MouseWheel>", self._wheel)
+        self.scroll.bind("<MouseWheel>", self._wheel)
+
+    # -- 分类
+    @staticmethod
+    def classify(line: str) -> tuple:
+        """返回 (颜色级别, 过滤分组)。分组：detail=逐条明细，quiet=常规信息。"""
+        s = line.strip()
+        if not s:
+            return "text2", "quiet"
+        if set(s) <= {"="} or set(s) <= {"-"}:
+            return "dim", "quiet"
+        if s.startswith("板块：") or s.startswith("板块（会话）"):
+            return "accent", "quiet"
+        if "本板块小结" in s:
+            return "ok", "quiet"
+        if any(k in s for k in ("没成功", "失败", "出错", "[出错]", "⚠", "错误")):
+            return "err", "quiet"
+        if any(k in s for k in ("重试", "降速", "配额", "缓一缓")):
+            return "warn", "quiet"
+        if s.startswith("[") and "/" in s.split("]")[0]:
+            if any(k in s for k in ("新点赞", "已确认点赞", "liked(", "digg-sent")):
+                return "like", "detail"
+            if any(k in s for k in ("原本已点赞", "already-liked")):
+                return "dim", "detail"
+            if any(k in s for k in ("待点赞", "dry-run")):
+                return "warn", "detail"
+            return "err", "detail"
+        if "提示" in s or "注意" in s:
+            return "warn", "quiet"
+        return "text2", "quiet"
+
+    # -- 写入
+    def append(self, line: str) -> None:
+        level, group = self.classify(line)
+        tags = [level, group]
+        if level == "accent":
+            tags.append("head")
+        at_bottom = self.text.yview()[1] >= 0.999
+        self.text.configure(state="normal")
+        self._insert(line, tuple(tags), group)
+        line_count = int(self.text.index("end-1c").split(".")[0])
+        if line_count > 3000:
+            self.text.delete("1.0", "800.0")
+        self.text.configure(state="disabled")
+        if at_bottom and self._autoscroll:
+            self.text.see("end")
+        if not self._has_content:
+            self._has_content = True
+            self.empty.place_forget()
+
+    def _insert(self, line: str, tags: tuple, group: str) -> None:
+        """逐条明细里，状态用彩色、标题用灰色——整行都染色太吵。"""
+        if group == "detail":
+            for label in DETAIL_LABELS:
+                pos = line.find(label)
+                if pos > 0:
+                    cut = pos + len(label)
+                    m = re.match(r"\([^)]*\)", line[cut:])
+                    if m:
+                        cut += m.end()
+                    self.text.insert("end", line[:cut], tags)
+                    self.text.insert("end", line[cut:] + "\n", ("text2", group))
+                    return
+        self.text.insert("end", line + "\n", tags)
+
+    def clear(self) -> None:
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.configure(state="disabled")
+        self._has_content = False
+        self.empty.place(relx=0.5, rely=0.5, anchor="center")
+
+    def dump(self) -> str:
+        return self.text.get("1.0", "end-1c")
+
+    def set_mode(self, mode: str) -> None:
+        """all=全部 / key=只看关键 / issue=只看问题。"""
+        self._mode = mode
+        self.text.tag_configure("detail", elide=mode in ("key", "issue"))
+        self.text.tag_configure("quiet", elide=mode == "issue")
+
+    def _wheel(self, e) -> str:
+        self.text.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        return "break"
+
+
+# ---------------------------------------------------------------- 文本 / 输入
+def label(master, text: str, size: int = 10, color: str = C["text2"],
+          bold: bool = False, bg: Optional[str] = None, **kw) -> tk.Label:
+    return tk.Label(master, text=text, font=T.f(size, bold), fg=color,
+                    bg=bg or C["surface"], anchor="w", **kw)
+
+
+def entry(master, textvariable=None, width: int = 12, size: int = 10) -> tk.Entry:
+    """浅色输入框：白底 + 1px 边框，聚焦时边框变主色。"""
+    return tk.Entry(
+        master, textvariable=textvariable, width=width, font=T.f(size),
+        bg=C["surface"], fg=C["text"], insertbackground=C["text"],
+        relief="flat", bd=0, highlightthickness=1,
+        highlightbackground=C["stroke_hi"], highlightcolor=C["accent"],
+        disabledbackground=C["surface_alt"], disabledforeground=C["text3"],
+    )
+
+
+def divider(master, pad: int = 0, bg: Optional[str] = None) -> tk.Frame:
+    return tk.Frame(master, bg=C["stroke"], height=1)
