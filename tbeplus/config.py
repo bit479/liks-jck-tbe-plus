@@ -7,11 +7,25 @@ config.json 是可选的，不存在就用下面 DEFAULTS 里的值。
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-APP_DIR = Path(__file__).resolve().parent.parent
+
+def _app_dir() -> Path:
+    """配置与运行产物的基准目录。
+
+    源码运行 = 仓库根目录；打包成 exe 后 = exe 所在目录。
+    （PyInstaller onefile 模式下 __file__ 指向临时解包目录，
+    配置写到那儿，程序一关就跟着没了。）
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+APP_DIR = _app_dir()
 CONFIG_FILE = APP_DIR / "config.json"
 
 

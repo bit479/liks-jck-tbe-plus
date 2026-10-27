@@ -135,9 +135,36 @@ class App:
         self._sync_sections()
         self.root.after(80, self._drain)
         self.root.after(500, self._tick)
-        self.root.after(60, lambda: self._apply_compact(self.root.winfo_width() < 1120))
+        self.root.after(60, self._sync_compact)
+        self.root.after(400, self._sync_compact)
+        self.root.after(260, self._sync_window_size)
         self.root.bind("<Configure>", self._on_root_configure)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _sync_window_size(self) -> None:
+        """把 Tk 的尺寸模型对回系统实际客户区。
+
+        某些 DPI 缩放/远程桌面环境里，窗口管理器会把窗口压到比请求更小，
+        但 Tk 仍按请求的尺寸排版——结果是右侧内容被裁掉，滚动条也出不来。
+        映射完成后用 Win32 读一次真实客户区，发现不一致就按真实尺寸重设。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            rect = wintypes.RECT()
+            if not ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(rect)):
+                return
+            rw, rh = rect.right, rect.bottom
+            if rw < 200 or rh < 200:
+                return
+            if abs(rw - self.root.winfo_width()) > 8 or \
+                    abs(rh - self.root.winfo_height()) > 8:
+                self.root.geometry(f"{rw}x{rh}")
+                self.root.after(60, self._sync_compact)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ==================================================================
     # 骨架
@@ -283,11 +310,27 @@ class App:
     def _on_root_configure(self, event) -> None:
         if event.widget is not self.root:
             return
+        self._debounce_compact()
+
+    def _on_page_configure(self, _event) -> None:
+        self._debounce_compact()
+
+    def _debounce_compact(self) -> None:
         if self._resize_job:
             self.root.after_cancel(self._resize_job)
-        self._resize_job = self.root.after(
-            140, lambda: self._apply_compact(self.root.winfo_width() < 1120)
-        )
+        self._resize_job = self.root.after(140, self._sync_compact)
+
+    def _sync_compact(self) -> None:
+        """按**内容区实际宽度**决定排几列。
+
+        不能只看窗口宽度：打包成 exe 后系统按 DPI 缩放，窗口可能被窗口管理器
+        压到比请求更窄，而 Tk 还认为自己有那么宽，于是右侧卡片被裁掉。
+        以内容区真实宽度为准，窗口被压缩也能自动变成两列。
+        """
+        width = self._cards_host.winfo_width()
+        if width <= 1:                      # 还没完成布局
+            width = self.root.winfo_width() - T.SIDEBAR_W - 2 * T.GAP_L
+        self._apply_compact(width < 4 * 232 + 3 * 12)
 
     def _apply_compact(self, compact: bool) -> None:
         if compact == self._compact:
@@ -338,6 +381,7 @@ class App:
         return row
 
     def _page_home(self, f: tk.Frame) -> None:
+        f.bind("<Configure>", self._on_page_configure)
         # ---------------- 指标 ----------------
         cards = tk.Frame(f, bg=C["bg"])
         cards.pack(fill=X)

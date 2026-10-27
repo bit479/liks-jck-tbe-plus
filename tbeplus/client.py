@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
@@ -39,6 +40,8 @@ def _noop(_: str) -> None:
 # 基础命令
 # ---------------------------------------------------------------------------
 def _run_powershell(script: str, timeout: float = 25.0) -> str:
+    # 打包成 --windowed 的 exe 后自身没有控制台，子进程默认会闪一个黑框
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -47,6 +50,7 @@ def _run_powershell(script: str, timeout: float = 25.0) -> str:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            creationflags=flags,
         )
         return (result.stdout or "").strip()
     except Exception:
