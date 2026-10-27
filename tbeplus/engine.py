@@ -24,7 +24,14 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 from .cdp import CDPSession, CDPError, list_targets
-from .config import Config
+from .config import APP_DIR, Config
+from .newsapi import (
+    NewsApi,
+    NewsApiError,
+    remembered_token,
+    remember_token,
+    scan_token_in_memory,
+)
 
 LogFn = Callable[[str], None]
 
@@ -142,6 +149,50 @@ class LikeEngine:
         self._stop = stop_flag or (lambda: False)
         # 新闻站栏目名 → section_code 的缓存（一次运行里查一次就够）
         self._codes: Optional[Dict[str, str]] = None
+        # 免客户端的纯 HTTP 会话（拿到 tbea_art_token 就有）
+        self.http: Optional[NewsApi] = None
+        self._http_checked = False
+        self._token_source = ""
+
+    # ------------------------------------------------------------------
+    async def ensure_http(self) -> bool:
+        """准备纯 HTTP 会话。成功返回 True，此时完全不需要客户端。"""
+        if self.http is not None:
+            return True
+        if not self.cfg.http_mode or self._http_checked:
+            return False
+        self._http_checked = True
+
+        state_path = APP_DIR / "state.json"
+        candidates = []
+        if self.cfg.news_token.strip():
+            candidates.append((self.cfg.news_token.strip(), "config.json"))
+        token = remembered_token(state_path)
+        if token:
+            candidates.append((token, "state.json"))
+
+        for token, source in candidates:
+            api = NewsApi(token, self.cfg.api_base, timeout=self.cfg.api_request_timeout)
+            if await asyncio.to_thread(api.check):
+                self.http = api
+                self._token_source = source
+                remember_token(state_path, token, source)
+                self.log(f"  认证：纯 HTTP 模式（token 来自 {source}），不需要客户端在线")
+                return True
+            self.log(f"  {source} 里的 token 已失效，继续找…")
+
+        # 从已登录客户端进程内存里找（新版钉钉优先）
+        token = await asyncio.to_thread(scan_token_in_memory)
+        if token:
+            api = NewsApi(token, self.cfg.api_base, timeout=self.cfg.api_request_timeout)
+            if await asyncio.to_thread(api.check):
+                self.http = api
+                self._token_source = "客户端内存"
+                remember_token(state_path, token, "客户端内存")
+                self.log("  认证：从客户端内存取到 token，已缓存到 state.json（纯 HTTP 模式）")
+                return True
+        self.log("  没有可用的新闻站 token，改用客户端会话")
+        return False
 
     # ------------------------------------------------------------------
     # 小工具
@@ -700,6 +751,10 @@ class LikeEngine:
 
         code 传空字符串表示"全部资讯"（钉钉版左侧新闻资讯栏的口径）。
         """
+        # 有 token 就走纯 HTTP，不需要任何客户端页面
+        if await self.ensure_http():
+            return await self._collect_site_http(card_name, stop_before, code)
+
         runner = await self._ensure_site_runner()
         if runner is None:
             self.log("  找不到新闻站页面，改用门户卡片列表")
@@ -736,6 +791,11 @@ class LikeEngine:
             f"  新闻站栏目「{card_name}」({where})："
             f"共 {info.get('total')} 篇，本次翻 {len(info.get('pages') or [])} 页取到 {len(items)} 篇"
         )
+        return self._site_items_to_articles(items)
+
+    def _site_items_to_articles(
+        self, items: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         articles: List[Dict[str, Any]] = []
         seen: set = set()
         for it in items:
@@ -760,10 +820,91 @@ class LikeEngine:
             )
         return articles
 
+    async def _collect_site_http(
+        self,
+        card_name: str,
+        stop_before: Optional[date] = None,
+        code: Optional[str] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """纯 HTTP 枚举（无客户端）。"""
+        api = self.http
+        if api is None:
+            return None
+        if code is None:
+            if self._codes is None:
+                try:
+                    self._codes = await asyncio.to_thread(api.portal_sections)
+                except NewsApiError:
+                    self._codes = {}
+            code = self._codes.get(card_name.strip())
+            if not code:
+                self.log(f"  新闻站栏目里没有「{card_name}」，改用门户卡片列表")
+                return None
+
+        items: List[Dict[str, Any]] = []
+        total: Optional[int] = None
+        pages = 0
+        page_size = max(1, self.cfg.site_page_size)
+        for page_no in range(1, max(1, self.cfg.site_max_pages) + 1):
+            if self._stop():
+                break
+            try:
+                page_items, count = await asyncio.to_thread(
+                    api.list_page, code, page_no, page_size
+                )
+            except NewsApiError as exc:
+                if page_no == 1:
+                    self.log(f"  新闻站接口没成功（{exc}），改用门户卡片列表")
+                    return None
+                self.log(f"  第 {page_no} 页没取到（{exc}），就用已有的 {len(items)} 篇")
+                break
+            if total is None:
+                total = count
+            if not page_items:
+                break
+            pages += 1
+            items.extend(page_items)
+            last = page_items[-1]
+            oldest = str(last.get("publish_time") or last.get("create_time") or "")[:10]
+            if stop_before is not None and oldest and oldest < stop_before.isoformat():
+                break
+            if total is not None and len(items) >= total:
+                break
+
+        where = f"section_code={code}" if code else "全部资讯"
+        self.log(
+            f"  新闻站栏目「{card_name}」({where})："
+            f"共 {total} 篇，本次翻 {pages} 页取到 {len(items)} 篇"
+        )
+        return self._site_items_to_articles(items)
+
     async def count_site_articles(
         self, card_name: str, code: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """只问总数和首页信息，不把整个列表翻完（给 --list 用，快）。"""
+        if await self.ensure_http():
+            api = self.http
+            if api is None:
+                return None
+            if code is None:
+                if self._codes is None:
+                    try:
+                        self._codes = await asyncio.to_thread(api.portal_sections)
+                    except NewsApiError:
+                        self._codes = {}
+                code = self._codes.get(card_name.strip())
+                if not code:
+                    return None
+            try:
+                items, total = await asyncio.to_thread(api.list_page, code, 1, 200)
+            except NewsApiError:
+                return None
+            return {
+                "total": total,
+                "latest": items[0] if items else None,
+                "oldest": items[-1] if items else None,
+            }
+
         runner = await self._ensure_site_runner()
         if runner is None:
             return None
@@ -1778,6 +1919,97 @@ class LikeEngine:
             return f"{label}(赞数 {count})"
         return label
 
+    async def _api_batch_http(self, ids: List[str], do_like: bool) -> List[Dict[str, Any]]:
+        """纯 HTTP 版的一批处理，返回结构和页面版完全一致。"""
+        api = self.http
+        if api is None:
+            raise NewsApiError("没有 HTTP 会话")
+        sem = asyncio.Semaphore(max(1, self.cfg.api_concurrency))
+
+        async def read_one(aid: str) -> Dict[str, Any]:
+            async with sem:
+                try:
+                    data = await asyncio.to_thread(api.detail, aid)
+                except (NewsApiError, ValueError):
+                    return {"id": aid, "bad": True}
+            return {
+                "id": aid,
+                "liked": bool(data.get("is_digg")),
+                "count": data.get("digg_count"),
+            }
+
+        async def like_one(aid: str) -> bool:
+            async with sem:
+                try:
+                    return await asyncio.to_thread(api.add_digg, aid)
+                except (NewsApiError, ValueError):
+                    return False
+
+        out: List[Dict[str, Any]] = []
+        todo: List[Dict[str, Any]] = [{"id": aid, "count": None} for aid in ids]
+        blind: List[Dict[str, Any]] = []
+
+        if self.cfg.api_read_state:
+            states = await asyncio.gather(*(read_one(s["id"]) for s in todo))
+            missed = [i for i, s in enumerate(states) if s.get("bad")]
+            if missed:
+                again = await asyncio.gather(
+                    *(read_one(todo[i]["id"]) for i in missed)
+                )
+                for k, i in enumerate(missed):
+                    states[i] = again[k]
+            kept = []
+            for i, s in enumerate(states):
+                if s.get("bad"):
+                    blind.append(todo[i])
+                elif s.get("liked"):
+                    out.append({"id": todo[i]["id"], "status": "already-liked"})
+                else:
+                    kept.append({"id": todo[i]["id"], "count": s.get("count")})
+            todo = kept
+
+        if todo:
+            if not do_like:
+                for item in todo:
+                    out.append(
+                        {"id": item["id"], "status": "dry-run", "count": item["count"]}
+                    )
+            else:
+                acted = await asyncio.gather(*(like_one(s["id"]) for s in todo))
+                done = []
+                for item, ok in zip(todo, acted):
+                    if ok:
+                        done.append(item)
+                    else:
+                        out.append({"id": item["id"], "status": "like-failed"})
+                if self.cfg.api_verify and done:
+                    fresh = await asyncio.gather(*(read_one(s["id"]) for s in done))
+                    for item, f in zip(done, fresh):
+                        ok = bool(f) and not f.get("bad") and f.get("liked")
+                        after = None if (not f or f.get("bad")) else f.get("count")
+                        if self.cfg.api_read_state:
+                            status = "liked" if ok else "like-unconfirmed"
+                        else:
+                            status = "digg-sent" if ok else "digg-unconfirmed"
+                        out.append({"id": item["id"], "status": status, "after": after})
+                else:
+                    status = "liked" if self.cfg.api_read_state else "digg-sent"
+                    out.extend({"id": s["id"], "status": status} for s in done)
+
+        if blind:
+            if not do_like:
+                out.extend({"id": s["id"], "status": "read-failed"} for s in blind)
+            else:
+                acted = await asyncio.gather(*(like_one(s["id"]) for s in blind))
+                for item, ok in zip(blind, acted):
+                    out.append(
+                        {
+                            "id": item["id"],
+                            "status": "digg-sent" if ok else "like-failed",
+                        }
+                    )
+        return out
+
     async def process_articles_via_api(
         self, articles: List[Dict[str, Any]], result: "SectionResult"
     ) -> Optional[List[Dict[str, Any]]]:
@@ -1797,10 +2029,14 @@ class LikeEngine:
         if not plan:
             return None
 
-        runner = await self.ensure_api_runner(articles)
-        if runner is None:
-            self.log("  找不到可用的新闻站页面，改用打开文章的方式")
-            return None
+        # 有 token 就纯 HTTP，完全不需要客户端；否则才去找新闻站页面
+        use_http = await self.ensure_http()
+        runner: Optional[Dict[str, Any]] = None
+        if not use_http:
+            runner = await self.ensure_api_runner(articles)
+            if runner is None:
+                self.log("  找不到可用的新闻站页面，改用打开文章的方式")
+                return None
 
         mode = "查状态+点赞" if self.cfg.api_read_state else "直接点赞"
         if self.dry_run:
@@ -1809,11 +2045,12 @@ class LikeEngine:
             f"  接口模式：{len(plan)} 篇，每批 {self.cfg.api_batch_size} 个、"
             f"并发 {self.cfg.api_concurrency}，{mode}"
         )
-        try:
-            async with CDPSession(runner["webSocketDebuggerUrl"], timeout=20) as s:
-                await s.send("Page.bringToFront")
-        except CDPError:
-            pass
+        if runner is not None:
+            try:
+                async with CDPSession(runner["webSocketDebuggerUrl"], timeout=20) as s:
+                    await s.send("Page.bringToFront")
+            except CDPError:
+                pass
 
         done_ids: Dict[str, str] = {}
         order = [aid for aid, _ in plan]
@@ -1853,23 +2090,27 @@ class LikeEngine:
                 rows = None
                 for attempt in range(3):
                     try:
-                        rows = await self._eval(
-                            runner,
-                            self._api_batch_js(ids, not self.dry_run),
-                            timeout=self.cfg.api_batch_timeout,
-                        )
+                        if use_http:
+                            rows = await self._api_batch_http(ids, not self.dry_run)
+                        else:
+                            rows = await self._eval(
+                                runner,
+                                self._api_batch_js(ids, not self.dry_run),
+                                timeout=self.cfg.api_batch_timeout,
+                            )
                         if isinstance(rows, list) and len(rows) == len(ids):
                             break
                         rows = None
-                    except CDPError:
+                    except (CDPError, NewsApiError):
                         rows = None
                     # 失败多半是页面卡住了：重新导航一次把它复位，再试同一批
                     self.log(f"  第 {attempt + 1} 次没成功，刷新接口页面后重试…")
-                    runner = await self.ensure_api_runner(
-                        [item for _, item in chunk], force=True
-                    )
-                    if runner is None:
-                        break
+                    if not use_http:
+                        runner = await self.ensure_api_runner(
+                            [item for _, item in chunk], force=True
+                        )
+                        if runner is None:
+                            break
                     await asyncio.sleep(1.0)
 
                 if rows is None:
@@ -2188,11 +2429,13 @@ class LikeEngine:
         return result
 
     async def run(self, channels: Optional[List[str]] = None, limit: int = 0) -> List[SectionResult]:
-        """跑完选定的板块。channels=None 表示三个板块全跑。"""
+        """跑完选定的板块。channels=None 表示全部板块都跑。"""
         results: List[SectionResult] = []
         selected = set(channels) if channels else None
 
-        if self.cfg.login_warmup:
+        # 有 token 就完全不需要客户端：不预热、不清理标签页
+        http_ready = await self.ensure_http()
+        if self.cfg.login_warmup and not http_ready:
             self.log("=" * 60)
             self.log("准备：登录预热（先从门户打开一篇文章，建立新闻模块登录态）")
             closed = await self.close_article_tabs()
@@ -2217,8 +2460,24 @@ class LikeEngine:
             results.append(await self.run_section(dt_name, limit, code=""))
 
         if self.cfg.session_channel and not self.cfg.skip_session_by_default:
-            if not self._stop() and (not selected or self.cfg.session_channel in selected):
-                results.append(await self.run_session_section(self.cfg.session_channel, limit))
+            from . import client as client_mod
+
+            if http_ready and client_mod.resolve_debug_port(self.cfg.debug_port) is None:
+                self.log("")
+                self.log("=" * 60)
+                self.log(f"板块（会话）：{self.cfg.session_channel}")
+                self.log("  纯 HTTP 模式下没有客户端，读不到会话消息，跳过这个板块")
+                results.append(
+                    SectionResult(
+                        name=self.cfg.session_channel, error="需要客户端读取消息"
+                    )
+                )
+            elif not self._stop() and (
+                not selected or self.cfg.session_channel in selected
+            ):
+                results.append(
+                    await self.run_session_section(self.cfg.session_channel, limit)
+                )
         return results
 
 

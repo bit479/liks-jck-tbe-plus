@@ -138,6 +138,13 @@ DEFAULTS: Dict[str, Any] = {
     # 一次要多少篇（实测 500 也能返回），以及最多翻多少页兜底
     "site_page_size": 200,
     "site_max_pages": 100,
+    # ---------------- 免客户端（纯 HTTP） ----------------
+    # 新闻站只认 Cookie: tbea_art_token=<32位十六进制>，带上它就能直接调
+    # 列表/详情/点赞接口，不需要任何客户端在线。
+    # 留空 = 自动从 state.json 或已登录客户端进程内存里取；
+    # 也可以 cli.py --token 手动写入。
+    "news_token": "",
+    "http_mode": True,
     # 发请求的最高频率（每秒几个）。
     # 实测服务端大约每 60 秒只放行 120 次点赞请求：第 121 次开始整片失败
     # （返回的业务码不是 1），一直失败到下一个时间窗才恢复。
@@ -211,6 +218,8 @@ class Config:
     site_api: bool = True
     site_page_size: int = 200
     site_max_pages: int = 100
+    news_token: str = ""
+    http_mode: bool = True
 
     # ------------------------------------------------------------------
     @property

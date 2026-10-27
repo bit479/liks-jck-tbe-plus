@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 from pathlib import Path
 
@@ -23,8 +24,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tbeplus import client as client_mod  # noqa: E402
 from tbeplus import __version__ as VERSION  # noqa: E402
+from tbeplus.config import APP_DIR  # noqa: E402
 from tbeplus.config import load_config  # noqa: E402
 from tbeplus.engine import LikeEngine, parse_user_date, summarize  # noqa: E402
+from tbeplus.newsapi import NewsApi, remember_token  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,6 +82,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="点赞后再查一次确认（最慢，适合想看得明明白白的时候）",
     )
+    parser.add_argument(
+        "--token",
+        metavar="TOKEN",
+        help="手动设置新闻站 tbea_art_token（32 位十六进制）。"
+        "保存到 state.json 后即可免客户端运行",
+    )
+    parser.add_argument(
+        "--no-http",
+        action="store_true",
+        help="不用纯 HTTP 模式，强制走客户端会话",
+    )
     return parser.parse_args()
 
 
@@ -108,6 +122,8 @@ async def main() -> int:
         cfg.restart_every_n_articles = args.restart_every
     if args.no_api:
         cfg.api_mode = False
+    if args.no_http:
+        cfg.http_mode = False
     if args.read_state or args.verify or args.dry_run:
         # --verify 隐含要先查状态，否则只能得到"复查到已赞"这一个结论
         # --dry-run 也必须查，不然它只能说"每篇都会去点赞"，等于没试运行
@@ -120,7 +136,24 @@ async def main() -> int:
     def log(message: str) -> None:
         print(message, flush=True)
 
+    if args.token:
+        token = args.token.strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", token):
+            log("token 格式不对：应为 32 位十六进制（例如 51bc7dc5a39d4a93aef3e8d4f238a99f）")
+            return 2
+        api = NewsApi(token, cfg.api_base)
+        if not await asyncio.to_thread(api.check):
+            log("这个 token 无效或已过期")
+            return 2
+        remember_token(APP_DIR / "state.json", token, "cli --token")
+        cfg.news_token = token
+        log("已保存到 state.json：以后不需要任何客户端在线也能点赞")
+
     if args.check:
+        engine = LikeEngine(cfg, dry_run=True, log=log)
+        if await engine.ensure_http():
+            log("已就绪：纯 HTTP 模式（不需要客户端在线）")
+            return 0
         port = client_mod.resolve_debug_port(cfg.debug_port, log)
         if port:
             cfg.debug_port = port
@@ -167,15 +200,18 @@ async def main() -> int:
             log(f"已经把端口 {used} 记到 config.json，以后会自动用它。")
         return 0
 
-    port = client_mod.resolve_debug_port(cfg.debug_port)
-    if port is None:
-        log(
-            f"端口 {cfg.debug_port} 往后都没找到调试接口，请先跑：python cli.py --attach"
-        )
-        return 1
-    cfg.debug_port = port
-
     engine = LikeEngine(cfg, dry_run=args.dry_run, log=log)
+    # 有 token 就完全不需要客户端；没有才要求接管客户端
+    http_ready = await engine.ensure_http()
+    if not http_ready:
+        port = client_mod.resolve_debug_port(cfg.debug_port)
+        if port is None:
+            log(
+                f"端口 {cfg.debug_port} 往后都没找到调试接口，请先跑：python cli.py --attach；"
+                "或者用 --token 设置新闻站 token（之后就不需要客户端）"
+            )
+            return 1
+        cfg.debug_port = port
 
     if args.list:
         def describe(articles):

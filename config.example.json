@@ -55,5 +55,8 @@
   "_钉钉版说明": "新版 TBe+（钉钉套壳）左侧的『新闻资讯』栏 = 新闻站全部资讯（各公司订阅号汇总，实测 1.4 万+ 篇）。true = 一起处理这个板块；它很大，建议一定设起始日期，没设时只跑最近 dingtalk_default_days 天。",
   "dingtalk_news": true,
   "dingtalk_news_name": "钉钉版e+新闻资讯",
-  "dingtalk_default_days": 7
+  "dingtalk_default_days": 7,
+  "_免客户端说明": "新闻站只认 Cookie: tbea_art_token=<32位十六进制>。填了 token 就纯 HTTP 运行，完全不需要客户端；留空则自动读 state.json / 已登录客户端进程内存。token 会过期，过期后重新打开新版 TBe+ 新闻页让它刷新，或 python cli.py --token <token> 手动写入。http_mode=false 可以强制回到客户端会话方式。",
+  "news_token": "",
+  "http_mode": true
 }

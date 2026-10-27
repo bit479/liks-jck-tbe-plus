@@ -338,13 +338,23 @@ class App:
         self._start("正式点赞", lambda: self._run_job(False))
 
     async def _run_job(self, dry_run: bool) -> None:
-        port = client_mod.resolve_debug_port(self.cfg.debug_port)
-        if port is None:
-            self.log("客户端还没接管，请先点「① 准备」。")
-            return
-        self.cfg.debug_port = port
         self.cfg.skip_session_by_default = bool(self.skip_session_var.get())
         self.cfg.dingtalk_news = not bool(self.skip_dingtalk_var.get())
+
+        # 先看有没有新闻站 token：有就完全不用客户端
+        probe = LikeEngine(self.cfg, dry_run=True, log=self.log)
+        http_ready = await probe.ensure_http()
+        if not http_ready:
+            port = client_mod.resolve_debug_port(self.cfg.debug_port)
+            if port is None:
+                self.log(
+                    "既没有新闻站 token，也没接管客户端。\n"
+                    "  想免客户端运行：双击 命令行.bat 执行 "
+                    "python cli.py --token <tbea_art_token>\n"
+                    "  或者先点「① 准备」接管旧客户端。"
+                )
+                return
+            self.cfg.debug_port = port
 
         # 时间段
         since = self.since_var.get().strip()
