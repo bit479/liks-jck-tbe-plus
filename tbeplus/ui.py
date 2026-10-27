@@ -33,6 +33,7 @@ import tkinter as tk
 
 from . import __version__ as VERSION
 from . import client as client_mod
+from . import motion
 from . import theme as T
 from . import widgets as W
 from .app_icon import asset
@@ -130,6 +131,7 @@ class App:
         self.cur_section: str | None = None
         self.sections: dict = {}
         self.page = HOME
+        motion.init(root)
 
         self._compact: bool | None = None
         self._resize_job = None
@@ -144,6 +146,7 @@ class App:
         self._drag_off = None
         self._resize_info = None
         self._portal_master = list(config.portal_cards)
+        self._home_intro_seen: set = set()
 
         sw, sh = self._work_area()
         w = min(1280, max(820, sw - 40))
@@ -166,6 +169,8 @@ class App:
             "ico24": tk.PhotoImage(file=str(asset("app_24.png"))),
             "ico44": tk.PhotoImage(file=str(asset("app_44.png"))),
             "ico64": tk.PhotoImage(file=str(asset("app_64.png"))),
+            "mode_old": tk.PhotoImage(file=str(asset("mode_old.png"))),
+            "mode_dingtalk": tk.PhotoImage(file=str(asset("mode_dingtalk.png"))),
         }
 
         self._build_titlebar()
@@ -184,6 +189,7 @@ class App:
         root.after(300, self._sync_window_size)
         self._refresh_adv()
         self._refresh_status()
+        root.after(60, lambda: motion.fade_window(root))
 
     # ==================================================================
     # 窗口外壳（无边框）
@@ -382,13 +388,15 @@ class App:
 
         cards = tk.Frame(center, bg=C["bg"])
         cards.pack(pady=(20, 0))
-        W.ModeCard(cards, self._imgs["ico44"], "老版本 TBe+",
-                   MODES["old"]["desc"], MODES["old"]["tags"],
-                   command=lambda: self._enter_mode("old")).pack(
-            side=LEFT, padx=(0, 14))
-        W.ModeCard(cards, self._imgs["ico44"], "钉钉版 TBe+",
-                   MODES["dingtalk"]["desc"], MODES["dingtalk"]["tags"],
-                   command=lambda: self._enter_mode("dingtalk")).pack(side=LEFT)
+        old_card = W.ModeCard(cards, self._imgs["mode_old"], "老版本 TBe+",
+                              MODES["old"]["desc"], MODES["old"]["tags"],
+                              command=lambda: self._enter_mode("old"))
+        old_card.pack(side=LEFT, padx=(0, 14))
+        dt_card = W.ModeCard(cards, self._imgs["mode_dingtalk"], "钉钉版 TBe+",
+                             MODES["dingtalk"]["desc"], MODES["dingtalk"]["tags"],
+                             command=lambda: self._enter_mode("dingtalk"))
+        dt_card.pack(side=LEFT)
+        self.mode_cards = [old_card, dt_card]
 
         tk.Label(center, text="进入后可以随时在「任务设置」里切换版本",
                  font=T.f(9), fg=C["text3"], bg=C["bg"]).pack(pady=(18, 0))
@@ -396,6 +404,13 @@ class App:
     def _show_mode_select(self) -> None:
         self.shell.pack_forget()
         self.mode_page.pack(fill=BOTH, expand=True)
+        self.root.after(80, self._reveal_mode_cards)
+
+    def _reveal_mode_cards(self) -> None:
+        if not motion.is_enabled():
+            return
+        for i, card in enumerate(getattr(self, "mode_cards", [])):
+            card.reveal(delay=i * motion.STAGGER)
 
     def _enter_mode(self, mode: str) -> None:
         self.mode = mode
@@ -410,7 +425,17 @@ class App:
         self.sub_var.set(MODES[mode]["sub"])
         self.log("")
         self.log(f"===== 已选择：{MODES[mode]['title']} =====")
+        if mode not in self._home_intro_seen:
+            self._home_intro_seen.add(mode)
+            self.root.after(90, self._intro_home)
         self.root.after(80, self._debounce_compact)
+
+    def _intro_home(self) -> None:
+        """概览首屏分层出现：统计卡以极短交错淡入，只播一次。"""
+        if not motion.is_enabled():
+            return
+        for i, card in enumerate(getattr(self, "_cards", [])):
+            card.reveal(delay=i * motion.STAGGER)
 
     def _switch_mode(self) -> None:
         if self.running:
@@ -531,6 +556,7 @@ class App:
     def _build_pages(self) -> None:
         host = tk.Frame(self.main, bg=C["bg"])
         host.pack(fill=BOTH, expand=True, padx=T.GAP_L, pady=(0, T.GAP_L))
+        self.page_host = host
         self.pages: dict = {}
         for key, builder in ((HOME, self._page_home), (LOG, self._page_log),
                              (SETTINGS, self._page_settings)):
@@ -538,13 +564,15 @@ class App:
             self.pages[key] = frame
             builder(frame)
 
-    def _show_page(self, key: str) -> None:
+    def _show_page(self, key: str, animate: bool = True) -> None:
         self.page = key
         for name, frame in self.pages.items():
             if name == key:
-                frame.pack(fill=BOTH, expand=True)
+                frame.place(x=0, y=0, relwidth=1, relheight=1)
+                if animate:
+                    motion.slide_in(frame)
             else:
-                frame.pack_forget()
+                frame.place_forget()
         for name, item in self.nav.items():
             item.set_active(name == key)
         self.title_var.set({HOME: "概览", LOG: "运行日志", SETTINGS: "任务设置"}[key])

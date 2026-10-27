@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import math
 import re
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import BOTH, LEFT, RIGHT, Y
 from typing import Callable, Optional
 
+from . import motion
 from . import theme as T
 from .theme import C
 
@@ -195,6 +197,10 @@ class Btn(tk.Canvas):
         self._state = "normal"
         self._hover = False
         self._pressed = False
+        self._hover_mix = 0.0
+        self._press_mix = 0.0
+        self._hover_anim = None
+        self._press_anim = None
         base_bg = bg
         if base_bg is None:
             try:
@@ -218,6 +224,7 @@ class Btn(tk.Canvas):
         self.bind("<ButtonRelease-1>", self._on_release)
         self.bind("<FocusIn>", lambda _e: self._draw())
         self.bind("<FocusOut>", lambda _e: self._draw())
+        self.bind("<Destroy>", self._on_destroy)
         self._draw()
 
     def _natural_width(self) -> int:
@@ -238,31 +245,61 @@ class Btn(tk.Canvas):
     def set_enabled(self, enabled: bool) -> None:
         self._state = "normal" if enabled else "disabled"
         self.configure(cursor="hand2" if enabled else "arrow")
+        self._hover_mix = 0.0
+        self._press_mix = 0.0
         self._draw()
+
+    def _on_destroy(self, _e) -> None:
+        for anim in (self._hover_anim, self._press_anim):
+            if anim:
+                anim.cancel()
+
+    def _animate_hover(self) -> None:
+        if self._hover_anim:
+            self._hover_anim.cancel()
+        start = self._hover_mix
+        target = 1.0 if (self._hover and self._state == "normal") else 0.0
+
+        def update(t: float) -> None:
+            self._hover_mix = start + (target - start) * t
+            self._draw()
+
+        self._hover_anim = motion.animate(motion.HOVER, update)
+
+    def _animate_press(self) -> None:
+        if self._press_anim:
+            self._press_anim.cancel()
+        start = self._press_mix
+        target = 1.0 if self._pressed else 0.0
+
+        def update(t: float) -> None:
+            self._press_mix = start + (target - start) * t
+            self._draw()
+
+        self._press_anim = motion.animate(motion.PRESS, update)
 
     # -- 事件
     def _on_enter(self, _e) -> None:
         self._hover = True
-        if self._state == "normal":
-            self._draw()
+        self._animate_hover()
 
     def _on_leave(self, _e) -> None:
         self._hover = False
         self._pressed = False
-        if self._state == "normal":
-            self._draw()
+        self._animate_hover()
+        self._animate_press()
 
     def _on_press(self, _e) -> None:
         if self._state != "normal":
             return
         self._pressed = True
-        self._draw()
+        self._animate_press()
 
     def _on_release(self, e) -> None:
         if self._state != "normal":
             return
         self._pressed = False
-        self._draw()
+        self._animate_press()
         if 0 <= e.x <= self._cw and 0 <= e.y <= self._h:
             self._invoke()
 
@@ -278,17 +315,19 @@ class Btn(tk.Canvas):
 
         if base is None:                      # ghost 与容器同色
             base = self._base_bg
-        fill = hover if (self._hover and self._state == "normal") else base
-        if self._pressed:
-            fill = blend(fill, C["ink"], 0.08)
+        fill = blend(base, hover, self._hover_mix)
+        if self._press_mix:
+            fill = blend(fill, C["ink"], 0.08 * self._press_mix)
         if self._state == "disabled":
             fill = blend(base, self._base_bg, 0.5)
             fg = C["text3"]
             edge = C["stroke"]
 
+        inset = round(self._press_mix)       # 约 2% 的按压感，不改变控件布局尺寸
         round_rect(
-            self, 1, 1, w - 1, h - 1, self._radius,
-            fill=fill, outline=edge or fill, width=1 if edge else 0,
+            self, 1 + inset, 1 + inset, w - 1 - inset, h - 1 - inset,
+            self._radius, fill=fill, outline=edge or fill,
+            width=1 if edge else 0,
         )
         if self.focus_get() is self:      # 键盘焦点提示
             round_rect(self, 0, 0, w, h, self._radius + 1,
@@ -297,8 +336,8 @@ class Btn(tk.Canvas):
         total = measure(self._font, self._text)
         if self._icon:
             total += measure(self._icon_font, self._icon) + 7
-        x = (w - total) / 2
-        cy = h / 2 + 0.5
+        x = (w - total) / 2 + inset
+        cy = h / 2 + 0.5 + inset
         if self._icon:
             self.create_text(x, cy, text=self._icon, font=self._icon_font,
                              fill=fg, anchor="w")
@@ -328,16 +367,76 @@ class StatCard(tk.Canvas):
         self._unit = unit
         self._note = note
         self._value = 0
+        self._hover = False
+        self._hover_mix = 0.0
+        self._pulse = 0.0
+        self._last_pulse = 0.0
+        self._hover_anim = None
+        self._pulse_anim = None
         self.bind("<Configure>", lambda _e: self._draw())
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.bind("<Destroy>", self._on_destroy)
         self.after(30, self._draw)
+
+    def _on_destroy(self, _e) -> None:
+        for anim in (self._hover_anim, self._pulse_anim):
+            if anim:
+                anim.cancel()
+
+    def _set_hover(self, on: bool) -> None:
+        self._hover = on
+        if self._hover_anim:
+            self._hover_anim.cancel()
+        start = self._hover_mix
+        target = 1.0 if on else 0.0
+
+        def update(t: float) -> None:
+            self._hover_mix = start + (target - start) * t
+            self._draw()
+
+        self._hover_anim = motion.animate(motion.CARD, update)
+
+    def reveal(self, delay: int = 0) -> None:
+        """首屏用：在同一 Canvas 上以网点遮罩做轻淡入，不改布局。"""
+        if not motion.is_enabled():
+            return
+        self._draw()
+        w, h = self.winfo_width(), self.winfo_height()
+        if w <= 4 or h <= 4:
+            return
+        mask = round_rect(self, 1, 1, w - 1, h - 1, T.RADIUS_CARD,
+                          fill=C["surface"], outline=C["surface"],
+                          stipple="gray75", tags="intro-mask")
+        steps = ("gray75", "gray50", "gray25", "gray12")
+
+        def update(t: float) -> None:
+            self.itemconfigure(mask, stipple=steps[min(3, int(t * 4))])
+
+        motion.animate(motion.CARD, update,
+                       done=lambda: self.delete(mask), delay=delay)
 
     def set(self, value: int, note: Optional[str] = None,
             accent: Optional[str] = None) -> None:
-        self._value = int(value)
+        value = int(value)
+        changed = value != self._value
+        self._value = value
         if note is not None:
             self._note = note
         if accent:
             self._accent = accent
+        now = time.monotonic()
+        if changed and now - self._last_pulse > 0.35:
+            self._last_pulse = now
+            if self._pulse_anim:
+                self._pulse_anim.cancel()
+            self._pulse = 1.0
+
+            def update(t: float) -> None:
+                self._pulse = 1.0 - t
+                self._draw()
+
+            self._pulse_anim = motion.animate(motion.STATUS, update)
         self._draw()
 
     def _draw(self) -> None:
@@ -345,8 +444,9 @@ class StatCard(tk.Canvas):
         if w <= 4 or h <= 4:
             return
         self.delete("all")
+        border = blend(C["stroke"], self._accent, 0.28 * self._hover_mix)
         round_rect(self, 1, 1, w - 1, h - 1, T.RADIUS_CARD,
-                   fill=C["surface"], outline=C["stroke"], width=1)
+                   fill=C["surface"], outline=border, width=1)
         # 左侧 3px 强调条：颜色对应指标语义，不抢文字
         round_rect(self, 1, 18, 4, h - 18, 1.5,
                    fill=self._accent, outline="", width=0)
@@ -359,7 +459,7 @@ class StatCard(tk.Canvas):
         num_font = T.f(22, True)
         label = f"{self._value:,}"
         self.create_text(20, 60, text=label, font=num_font,
-                         fill=C["text"], anchor="w")
+                         fill=blend(C["text"], self._accent, self._pulse), anchor="w")
         nw = measure(num_font, label)
         self.create_text(24 + nw, 64, text=self._unit, font=T.f(9),
                          fill=C["text3"], anchor="w")
@@ -380,15 +480,30 @@ class Bar(tk.Canvas):
         self._h = height
         self._color = color
         self._track = track
-        self._frac = 0.0
+        self._frac = 0.0                 # 真实目标值，立即更新
+        self._display_frac = 0.0         # 画布上的平滑显示值
+        self._anim = None
         self.bind("<Configure>", lambda _e: self._draw())
+        self.bind("<Destroy>", lambda _e: self._anim and self._anim.cancel())
 
-    def set(self, frac: float) -> None:
+    def set(self, frac: float, immediate: bool = False) -> None:
         frac = max(0.0, min(1.0, float(frac)))
-        if abs(frac - self._frac) < 0.002:
+        if abs(frac - self._frac) < 0.002 and not immediate:
             return
+        if self._anim:
+            self._anim.cancel()
         self._frac = frac
-        self._draw()
+        start = self._display_frac
+        if immediate or frac == 0.0:
+            self._display_frac = frac
+            self._draw()
+            return
+
+        def update(t: float) -> None:
+            self._display_frac = start + (frac - start) * t
+            self._draw()
+
+        self._anim = motion.animate(motion.PROGRESS, update)
 
     def set_color(self, color: str) -> None:
         self._color = color
@@ -402,8 +517,8 @@ class Bar(tk.Canvas):
         h = self._h
         r = h / 2
         round_rect(self, 0, 0, w, h, r, fill=self._track, outline="", width=0)
-        if self._frac > 0:
-            round_rect(self, 0, 0, max(h, w * self._frac), h, r,
+        if self._display_frac > 0:
+            round_rect(self, 0, 0, max(h, w * self._display_frac), h, r,
                        fill=self._color, outline="", width=0)
 
 
@@ -427,6 +542,10 @@ class Chip(tk.Canvas):
         self._command = command
         self._h = height
         self._hover = False
+        self._mix = 1.0 if value else 0.0
+        self._hover_mix = 0.0
+        self._anim = None
+        self._hover_anim = None
         w = measure(self._font, text) + 32
         super().__init__(master, width=w, height=height,
                          bg=bg or C["surface"], highlightthickness=0, bd=0,
@@ -435,15 +554,41 @@ class Chip(tk.Canvas):
         self.bind("<Enter>", lambda _e: self._set_hover(True))
         self.bind("<Leave>", lambda _e: self._set_hover(False))
         self.bind("<Button-1>", self._click)
+        self.bind("<Destroy>", self._on_destroy)
         self._draw()
+
+    def _on_destroy(self, _e) -> None:
+        for anim in (self._anim, self._hover_anim):
+            if anim:
+                anim.cancel()
+
+    def _animate(self, hover: bool = False) -> None:
+        attr = "_hover_anim" if hover else "_anim"
+        old = getattr(self, attr)
+        if old:
+            old.cancel()
+        start = self._hover_mix if hover else self._mix
+        target = (1.0 if self._hover else 0.0) if hover else \
+            (1.0 if self._value else 0.0)
+
+        def update(t: float) -> None:
+            value = start + (target - start) * t
+            if hover:
+                self._hover_mix = value
+            else:
+                self._mix = value
+            self._draw()
+
+        setattr(self, attr, motion.animate(
+            motion.HOVER if hover else motion.STATUS, update))
 
     def _set_hover(self, on: bool) -> None:
         self._hover = on
-        self._draw()
+        self._animate(hover=True)
 
     def _click(self, _e) -> None:
         self._value = not self._value
-        self._draw()
+        self._animate()
         if self._command:
             self._command()
 
@@ -452,17 +597,17 @@ class Chip(tk.Canvas):
 
     def set(self, value: bool) -> None:
         self._value = bool(value)
-        self._draw()
+        self._animate()
 
     def _draw(self) -> None:
         self.delete("all")
         w, h = self._cw, self._h
-        if self._value:
-            fill, edge, fg, dot = C["accent_soft"], C["accent_line"], C["accent_hi"], C["accent"]
-        else:
-            fill = C["surface_hover"] if self._hover else C["surface"]
-            edge = C["stroke_hi"] if self._hover else C["stroke"]
-            fg, dot = C["slate"], C["stroke_hi"]
+        off_fill = blend(C["surface"], C["surface_hover"], self._hover_mix)
+        off_edge = blend(C["stroke"], C["stroke_hi"], self._hover_mix)
+        fill = blend(off_fill, C["accent_soft"], self._mix)
+        edge = blend(off_edge, C["accent_line"], self._mix)
+        fg = blend(C["slate"], C["accent_hi"], self._mix)
+        dot = blend(C["stroke_hi"], C["accent"], self._mix)
         round_rect(self, 1, 1, w - 1, h - 1, h / 2,
                    fill=fill, outline=edge, width=1)
         self.create_oval(11, h / 2 - 2.5, 16, h / 2 + 2.5, fill=dot, outline="")
@@ -484,12 +629,27 @@ class Switch(tk.Canvas):
                          highlightthickness=0, bd=0, cursor="hand2")
         self._value = bool(value)
         self._command = command
+        self._mix = 1.0 if value else 0.0
+        self._anim = None
         self.bind("<Button-1>", self._click)
+        self.bind("<Destroy>", lambda _e: self._anim and self._anim.cancel())
         self._draw()
+
+    def _animate(self) -> None:
+        if self._anim:
+            self._anim.cancel()
+        start = self._mix
+        target = 1.0 if self._value else 0.0
+
+        def update(t: float) -> None:
+            self._mix = start + (target - start) * t
+            self._draw()
+
+        self._anim = motion.animate(motion.STATUS, update)
 
     def _click(self, _e) -> None:
         self._value = not self._value
-        self._draw()
+        self._animate()
         if self._command:
             self._command()
 
@@ -498,16 +658,15 @@ class Switch(tk.Canvas):
 
     def set(self, value: bool) -> None:
         self._value = bool(value)
-        self._draw()
+        self._animate()
 
     def _draw(self) -> None:
         self.delete("all")
-        on = self._value
-        track = C["accent"] if on else C["stroke_hi"]
+        track = blend(C["stroke_hi"], C["accent"], self._mix)
         round_rect(self, 1, 3, 37, 19, 8, fill=track, outline="", width=0)
-        cx = 29 if on else 9
+        cx = 9 + 20 * self._mix
         self.create_oval(cx - 7, 4, cx + 7, 18, fill=C["on_dark"],
-                         outline=C["stroke"] if not on else "")
+                         outline=C["stroke"] if self._mix < 0.5 else "")
 
 
 class Stepper(tk.Canvas):
@@ -610,19 +769,51 @@ class NavItem(tk.Canvas):
         self._command = command
         self._active = active
         self._hover = False
+        self._active_mix = 1.0 if active else 0.0
+        self._hover_mix = 0.0
+        self._active_anim = None
+        self._hover_anim = None
         self._cw, self._ch = width, height
         self.bind("<Enter>", lambda _e: self._hover_in(True))
         self.bind("<Leave>", lambda _e: self._hover_in(False))
         self.bind("<Button-1>", self._click)
+        self.bind("<Destroy>", self._on_destroy)
         self._draw()
 
+    def _on_destroy(self, _e) -> None:
+        for anim in (self._active_anim, self._hover_anim):
+            if anim:
+                anim.cancel()
+
+    def _animate(self, hover: bool = False) -> None:
+        attr = "_hover_anim" if hover else "_active_anim"
+        old = getattr(self, attr)
+        if old:
+            old.cancel()
+        start = self._hover_mix if hover else self._active_mix
+        target = (1.0 if self._hover else 0.0) if hover else \
+            (1.0 if self._active else 0.0)
+
+        def update(t: float) -> None:
+            value = start + (target - start) * t
+            if hover:
+                self._hover_mix = value
+            else:
+                self._active_mix = value
+            self._draw()
+
+        setattr(self, attr, motion.animate(
+            motion.HOVER if hover else motion.STATUS, update))
+
     def set_active(self, active: bool) -> None:
+        if active == self._active:
+            return
         self._active = active
-        self._draw()
+        self._animate()
 
     def _hover_in(self, on: bool) -> None:
         self._hover = on
-        self._draw()
+        self._animate(hover=True)
 
     def _click(self, _e) -> None:
         if self._command:
@@ -631,18 +822,19 @@ class NavItem(tk.Canvas):
     def _draw(self) -> None:
         self.delete("all")
         w, h = self._cw, self._ch
-        if self._active:
-            round_rect(self, 0, 2, w, h - 2, 8, fill=C["nav_active"],
+        hover_bg = blend(C["nav"], C["nav_hover"], self._hover_mix)
+        bg = blend(hover_bg, C["nav_active"], self._active_mix)
+        if self._active_mix > 0.01 or self._hover_mix > 0.01:
+            round_rect(self, 0, 2, w, h - 2, 8, fill=bg, outline="", width=0)
+        if self._active_mix > 0.01:
+            round_rect(self, 0, 12, 3, h - 12, 1.5,
+                       fill=blend(C["nav"], C["nav_accent"], self._active_mix),
                        outline="", width=0)
-            round_rect(self, 0, 12, 3, h - 12, 1.5, fill=C["nav_accent"],
-                       outline="", width=0)
-            fg, icon_fg = C["on_dark"], C["nav_accent"]
-        elif self._hover:
-            round_rect(self, 0, 2, w, h - 2, 8, fill=C["nav_hover"],
-                       outline="", width=0)
-            fg, icon_fg = C["nav_text"], C["nav_muted"]
-        else:
-            fg, icon_fg = C["nav_muted"], C["nav_icon"]
+        fg = blend(C["nav_muted"], C["on_dark"], self._active_mix)
+        icon_fg = blend(C["nav_icon"], C["nav_accent"], self._active_mix)
+        if not self._active and self._hover_mix:
+            fg = blend(fg, C["nav_text"], self._hover_mix)
+            icon_fg = blend(icon_fg, C["nav_muted"], self._hover_mix)
         self.create_text(20, h / 2, text=self._glyph, font=T.icon(11), fill=icon_fg)
         self.create_text(42, h / 2, text=self._text,
                          font=T.f(10, self._active), fill=fg, anchor="w")
@@ -665,21 +857,33 @@ class StatusPill(tk.Canvas):
                          highlightthickness=0, bd=0)
         self._text = text
         self._tone = tone
+        self._colors = self.TONES.get(tone, self.TONES["idle"])
+        self._anim = None
         self._cw = measure(T.f(9), text) + 34
         self.configure(width=self._cw)
+        self.bind("<Destroy>", lambda _e: self._anim and self._anim.cancel())
         self._draw()
 
     def set(self, text: str, tone: str = "idle") -> None:
+        old = self._colors
+        new = self.TONES.get(tone, self.TONES["idle"])
         self._text = text
         self._tone = tone
         self._cw = measure(T.f(9), text) + 34
         self.configure(width=self._cw)
-        self._draw()
+        if self._anim:
+            self._anim.cancel()
+
+        def update(t: float) -> None:
+            self._colors = tuple(blend(old[i], new[i], t) for i in range(3))
+            self._draw()
+
+        self._anim = motion.animate(motion.STATUS, update)
 
     def _draw(self) -> None:
         self.delete("all")
         w, h = int(self._cw), 26
-        dot, fill, fg = self.TONES.get(self._tone, self.TONES["idle"])
+        dot, fill, fg = self._colors
         round_rect(self, 1, 1, w - 1, h - 1, h / 2, fill=fill,
                    outline=dot if self._tone != "idle" else C["stroke"], width=1)
         self.create_oval(12, h / 2 - 3, 18, h / 2 + 3, fill=dot, outline="")
@@ -851,6 +1055,9 @@ class LogView(tk.Frame):
         self._autoscroll = True
         self._has_content = False
         self._mode = "all"
+        self._fade_recent: list = []
+        self._fade_seq = 0
+        self._fade_anim: set = set()
         self.text.bind("<MouseWheel>", self._wheel)
         self.scroll.bind("<MouseWheel>", self._wheel)
 
@@ -893,6 +1100,7 @@ class LogView(tk.Frame):
             tags.append("head")
         at_bottom = self.text.yview()[1] >= 0.999
         now = stamp or _time.strftime("%H:%M:%S")
+        start_index = self.text.index("end-1c")
         self.text.configure(state="normal")
         self.text.insert("end", f"{now}\t", (group,))
         self.text.insert("end", f"{self.CODES.get(level, 'INFO')}\t",
@@ -907,6 +1115,46 @@ class LogView(tk.Frame):
         if not self._has_content:
             self._has_content = True
             self.empty.place_forget()
+        self._fade_new_line(start_index, level, group)
+
+    def _fade_new_line(self, start: str, level: str, group: str) -> None:
+        """新行轻淡入。高频时自动降级、限制并发，不设长期定时器。
+
+        只对新增的那一行加一个临时 tag，用同一动效时钟把前景色从底色
+        过渡到级别色；结束后删掉 tag，级别色立刻归位。用户在看旧日志时
+        不强制滚动，淡入不改变消息顺序与内容。
+        """
+        if not motion.is_enabled():
+            return
+        now = time.monotonic()
+        self._fade_recent = [t for t in self._fade_recent if now - t < 0.5]
+        if len(self._fade_recent) >= 8 or len(self._fade_anim) >= 12:
+            return
+        self._fade_recent.append(now)
+        self._fade_seq += 1
+        tag = f"_fade{self._fade_seq}"
+        color = self.LEVELS.get(level, C["text"])
+        self.text.tag_configure(tag, foreground=color)
+        end = self.text.index("end-1c")
+        self.text.tag_add(tag, start, end)
+        handle = {}
+
+        def update(t: float) -> None:
+            try:
+                self.text.tag_configure(tag, foreground=blend(self._bg, color, t))
+            except tk.TclError:
+                handle["a"] and handle["a"].cancel()
+
+        def done() -> None:
+            self._fade_anim.discard(handle["a"])
+            try:
+                self.text.tag_delete(tag)
+            except tk.TclError:
+                pass
+
+        anim = motion.animate(motion.LOG, update, done=done)
+        handle["a"] = anim
+        self._fade_anim.add(anim)
 
     def _insert(self, line: str, tags: tuple, group: str) -> None:
         """逐条明细里，状态用彩色、标题用灰色——整行都染色太吵。"""
@@ -997,11 +1245,11 @@ class IconBtn(tk.Canvas):
         self.delete("all")
         if hover:
             self.create_rectangle(0, 0, self._cw, self._ch,
-                                  fill="#DC2626" if self._danger else self._hover_bg,
+                                  fill=C["err"] if self._danger else self._hover_bg,
                                   outline="")
         self.create_text(self._cw / 2, self._ch / 2, text=self._glyph,
                          font=T.icon(self._size),
-                         fill="#FFFFFF" if (hover and self._danger) else C["nav_text"])
+                         fill=C["on_dark"] if (hover and self._danger) else C["nav_text"])
 
 
 # ---------------------------------------------------------------- 版本入口卡
@@ -1027,23 +1275,52 @@ class ModeCard(tk.Canvas):
         self._command = command
         self._cw, self._ch = width, height
         self._hover = False
-        self.bind("<Enter>", lambda _e: self._paint(True))
-        self.bind("<Leave>", lambda _e: self._paint(False))
+        self._hover_mix = 0.0
+        self._anim = None
+        self.bind("<Enter>", lambda _e: self._animate_hover(True))
+        self.bind("<Leave>", lambda _e: self._animate_hover(False))
         self.bind("<Button-1>", lambda _e: command())
-        self._paint(False)
+        self.bind("<Destroy>", lambda _e: self._anim and self._anim.cancel())
+        self._paint()
 
-    def _paint(self, hover: bool) -> None:
-        self._hover = hover
+    def _animate_hover(self, on: bool) -> None:
+        self._hover = on
+        if self._anim:
+            self._anim.cancel()
+        start = self._hover_mix
+        target = 1.0 if on else 0.0
+
+        def update(t: float) -> None:
+            self._hover_mix = start + (target - start) * t
+            self._paint()
+
+        self._anim = motion.animate(motion.CARD, update)
+
+    def reveal(self, delay: int = 0) -> None:
+        """入口卡淡入（同画布网点遮罩）。"""
+        if not motion.is_enabled():
+            return
+        self._paint()
+        w, h = self._cw, self._ch
+        mask = round_rect(self, 1, 1, w - 1, h - 1, T.RADIUS_CARD + 2,
+                          fill=C["surface"], outline=C["surface"],
+                          stipple="gray75", tags="intro-mask")
+        steps = ("gray75", "gray50", "gray25", "gray12")
+
+        def update(t: float) -> None:
+            self.itemconfigure(mask, stipple=steps[min(3, int(t * 4))])
+
+        motion.animate(motion.CARD, update,
+                       done=lambda: self.delete(mask), delay=delay)
+
+    def _paint(self) -> None:
         self.delete("all")
         w, h = self._cw, self._ch
+        mix = self._hover_mix
+        outline = blend(C["stroke"], C["accent"], mix)
         round_rect(self, 1, 1, w - 1, h - 1, T.RADIUS_CARD + 2,
-                   fill=C["surface"],
-                   outline=C["accent"] if hover else C["stroke"],
-                   width=2 if hover else 1)
-        if hover:
-            round_rect(self, 1, 1, w - 1, h - 1, T.RADIUS_CARD + 2,
-                       fill=C["accent_soft"], outline="", width=0)
-            self.tag_lower("all")
+                   fill=blend(C["surface"], C["accent_soft"], mix * 0.5),
+                   outline=outline, width=1 + mix)
         self.create_image(34, 40, image=self._img, anchor="center")
         self.create_text(66, 32, text=self._title, font=T.f(13, True),
                          fill=C["text"], anchor="w")
@@ -1055,10 +1332,10 @@ class ModeCard(tk.Canvas):
         for text in self._tags:
             tw = measure(T.f(8), text) + 20
             round_rect(self, x, y - 11, x + tw, y + 11, 11,
-                       fill=C["accent_soft"] if hover else C["surface_hi"],
+                       fill=blend(C["surface_hi"], C["accent_soft"], mix),
                        outline="", width=0)
             self.create_text(x + 10, y, text=text, font=T.f(8),
-                             fill=C["accent_hi"] if hover else C["text2"],
+                             fill=blend(C["text2"], C["accent_hi"], mix),
                              anchor="w")
             x += tw + 8
 
