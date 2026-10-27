@@ -197,6 +197,21 @@ async def main() -> int:
                 await asyncio.sleep(7)
                 articles = await engine.collect_list_articles()
             log(f"{card}: {describe(articles)}")
+        if cfg.dingtalk_news:
+            # 一万多篇，别为了看一眼数量把整条列表翻完：只要总数 + 首页
+            info = await engine.count_site_articles(cfg.dingtalk_news_name, code="")
+            if info:
+                latest = str(
+                    (info.get("latest") or {}).get("publish_time")
+                    or (info.get("latest") or {}).get("create_time")
+                    or ""
+                )[:10]
+                log(
+                    f"{cfg.dingtalk_news_name}: 共 {info.get('total')} 篇"
+                    f"（最新 {latest or '未知'}；运行时按时间段自动翻页）"
+                )
+            else:
+                log(f"{cfg.dingtalk_news_name}: 取不到（新闻站接口不可用）")
         if cfg.session_channel and not cfg.skip_session_by_default:
             if await engine.switch_to_messages() and await engine.open_session(
                 cfg.session_channel

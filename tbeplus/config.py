@@ -36,6 +36,17 @@ DEFAULTS: Dict[str, Any] = {
     # false = 默认也处理会话型板块
     "skip_session_by_default": False,
 
+    # ---------------- 钉钉版 e+ 新闻资讯（新版 TBe+） ----------------
+    # 新版 TBe+ 是钉钉套壳，左侧有一个"新闻资讯"栏，内容就是新闻站的
+    # **全部资讯**（各公司/部门的订阅号新闻汇总，实测 1.4 万+ 篇）：
+    #   GET /api/article/lists?page_no=1&page_size=200        （不带 section_code）
+    # 文章页是 /pc/news?id=<id>（旧版是 /pc/show），点赞接口还是同一个 addDigg。
+    # 这个板块很大，建议配合起始日期使用。
+    "dingtalk_news": True,
+    "dingtalk_news_name": "钉钉版e+新闻资讯",
+    # 钉钉版新闻有 1.4 万篇，没设起始日期时默认只跑最近几天
+    "dingtalk_default_days": 7,
+
     # ---------------- 页面标识 ----------------
     "portal_url_hint": "miniapp://portal",
     "list_host": "ejia.tbea.com",
@@ -126,7 +137,7 @@ DEFAULTS: Dict[str, Any] = {
     "site_api": True,
     # 一次要多少篇（实测 500 也能返回），以及最多翻多少页兜底
     "site_page_size": 200,
-    "site_max_pages": 50,
+    "site_max_pages": 100,
     # 发请求的最高频率（每秒几个）。
     # 实测服务端大约每 60 秒只放行 120 次点赞请求：第 121 次开始整片失败
     # （返回的业务码不是 1），一直失败到下一个时间窗才恢复。
@@ -148,6 +159,9 @@ class Config:
     portal_cards: List[str] = field(default_factory=list)
     session_channel: str = ""
     skip_session_by_default: bool = False
+    dingtalk_news: bool = True
+    dingtalk_news_name: str = "钉钉版e+新闻资讯"
+    dingtalk_default_days: int = 7
 
     portal_url_hint: str = "miniapp://portal"
     list_host: str = ""
@@ -196,7 +210,7 @@ class Config:
     api_backoff: float = 20.0
     site_api: bool = True
     site_page_size: int = 200
-    site_max_pages: int = 50
+    site_max_pages: int = 100
 
     # ------------------------------------------------------------------
     @property

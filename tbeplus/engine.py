@@ -20,7 +20,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 from .cdp import CDPSession, CDPError, list_targets
@@ -649,8 +649,10 @@ class LikeEngine:
             r"""((async (cfg) => {
   const out = { ok: true, items: [], pages: [], total: null };
   for (let page = 1; page <= cfg.maxPages; page++) {
-    const url = cfg.base + '/article/lists?section_code=' + encodeURIComponent(cfg.code)
-      + '&page_no=' + page + '&page_size=' + cfg.pageSize;
+    // code 为空 = 全部资讯（钉钉版左侧"新闻资讯"栏就是它）
+    const url = cfg.base + '/article/lists'
+      + (cfg.code ? '?section_code=' + encodeURIComponent(cfg.code) + '&' : '?')
+      + 'page_no=' + page + '&page_size=' + cfg.pageSize;
     let body = null;
     try {
       const r = await fetch(url, { credentials: 'include' });
@@ -689,18 +691,25 @@ class LikeEngine:
         )
 
     async def collect_site_articles(
-        self, card_name: str, stop_before: Optional[date] = None
+        self,
+        card_name: str,
+        stop_before: Optional[date] = None,
+        code: Optional[str] = None,
     ) -> Optional[List[Dict[str, Any]]]:
-        """用新闻站接口把某个栏目拉全。拿不到就返回 None（调用方退回老办法）。"""
+        """用新闻站接口把某个栏目拉全。拿不到就返回 None（调用方退回老办法）。
+
+        code 传空字符串表示"全部资讯"（钉钉版左侧新闻资讯栏的口径）。
+        """
         runner = await self._ensure_site_runner()
         if runner is None:
             self.log("  找不到新闻站页面，改用门户卡片列表")
             return None
-        codes = await self._section_codes(runner)
-        code = codes.get(card_name.strip())
-        if not code:
-            self.log(f"  新闻站栏目里没有「{card_name}」，改用门户卡片列表")
-            return None
+        if code is None:
+            codes = await self._section_codes(runner)
+            code = codes.get(card_name.strip())
+            if not code:
+                self.log(f"  新闻站栏目里没有「{card_name}」，改用门户卡片列表")
+                return None
 
         try:
             info = await self._eval(
@@ -722,8 +731,9 @@ class LikeEngine:
             return None
 
         items = info.get("items") or []
+        where = f"section_code={code}" if code else "全部资讯"
         self.log(
-            f"  新闻站栏目「{card_name}」(section_code={code})："
+            f"  新闻站栏目「{card_name}」({where})："
             f"共 {info.get('total')} 篇，本次翻 {len(info.get('pages') or [])} 页取到 {len(items)} 篇"
         )
         articles: List[Dict[str, Any]] = []
@@ -749,6 +759,35 @@ class LikeEngine:
                 }
             )
         return articles
+
+    async def count_site_articles(
+        self, card_name: str, code: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """只问总数和首页信息，不把整个列表翻完（给 --list 用，快）。"""
+        runner = await self._ensure_site_runner()
+        if runner is None:
+            return None
+        if code is None:
+            codes = await self._section_codes(runner)
+            code = codes.get(card_name.strip())
+            if not code:
+                return None
+        try:
+            info = await self._eval(
+                runner, self._site_list_js(code, None, 200, 1), timeout=90
+            )
+        except CDPError:
+            return None
+        if not isinstance(info, dict) or not info.get("ok"):
+            return None
+        items = info.get("items") or []
+        latest = items[0] if items else None
+        oldest = items[-1] if items else None
+        return {
+            "total": info.get("total"),
+            "latest": latest,
+            "oldest": oldest,
+        }
 
     def _list_js(self, stop_before: Optional[date], max_pages: int) -> str:
         """按页把列表拉全的脚本。
@@ -1970,20 +2009,40 @@ class LikeEngine:
         self.log("  客户端已重启，继续处理")
         return True
 
-    async def run_section(self, card_name: str, limit: int = 0) -> SectionResult:
+    async def run_section(
+        self, card_name: str, limit: int = 0, code: Optional[str] = None
+    ) -> SectionResult:
         result = SectionResult(name=card_name)
         self.log("")
         self.log("=" * 60)
         self.log(f"板块：{card_name}")
         since, _until = self.date_range()
+        if code == "" and since is None:
+            # 钉钉版"新闻资讯"是各公司订阅号的全部资讯（一万多篇），
+            # 不设起始日期就全量跑要几个小时，这里给个保守默认值
+            days = max(1, self.cfg.dingtalk_default_days)
+            since = date.today() - timedelta(days=days)
+            self.log(
+                f"  没设置起始日期：钉钉版新闻有上万篇，先只跑最近 {days} 天"
+                f"（从 {since} 起）。要更多请在时间段里选起始日期。"
+            )
 
         # 首选：新闻站自己的栏目接口（能翻到很早的文章，门户那张卡片只给 200 篇）
         articles: List[Dict[str, Any]] = []
         if self.cfg.site_api:
             articles = (
-                await self.collect_site_articles(card_name, stop_before=since) or []
+                await self.collect_site_articles(
+                    card_name, stop_before=since, code=code
+                )
+                or []
             )
         if not articles:
+            if code is not None:
+                # 这个板块只存在于新闻站接口里（比如钉钉版新闻资讯），
+                # 门户上没有对应卡片，没法退回点击方式
+                self.log("  新闻站接口没取到这个板块的文章")
+                result.error = "site-empty"
+                return result
             opened = await self.open_channel(card_name)
             if opened is None:
                 self.log("  打不开板块列表页，跳过")
@@ -2147,6 +2206,15 @@ class LikeEngine:
             if selected and card not in selected:
                 continue
             results.append(await self.run_section(card, limit))
+
+        # 新版 TBe+（钉钉套壳）左侧"新闻资讯"栏 = 新闻站全部资讯
+        dt_name = self.cfg.dingtalk_news_name
+        if (
+            self.cfg.dingtalk_news
+            and not self._stop()
+            and (not selected or dt_name in selected)
+        ):
+            results.append(await self.run_section(dt_name, limit, code=""))
 
         if self.cfg.session_channel and not self.cfg.skip_session_by_default:
             if not self._stop() and (not selected or self.cfg.session_channel in selected):

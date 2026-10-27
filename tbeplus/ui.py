@@ -95,6 +95,10 @@ class App:
         ttk.Checkbutton(
             row3, text="跳过【进出口公司新闻资讯】", variable=self.skip_session_var
         ).pack(side=LEFT, padx=20)
+        self.skip_dingtalk_var = BooleanVar(value=not self.cfg.dingtalk_news)
+        ttk.Checkbutton(
+            row3, text="跳过【钉钉版e+新闻资讯】", variable=self.skip_dingtalk_var
+        ).pack(side=LEFT)
         # 默认关：查了状态才能说清"新点赞了几篇/本来就有多少"，这对用户更有用
         self.fast_var = BooleanVar(value=not self.cfg.api_read_state)
         ttk.Checkbutton(
@@ -328,7 +332,7 @@ class App:
 
     def _on_run(self) -> None:
         if not messagebox.askyesno(
-            "开始点赞", "将对三个板块里所有未点赞的文章执行点赞。\n\n确定继续吗？"
+            "开始点赞", "将对各板块里所有未点赞的文章执行点赞。\n\n确定继续吗？"
         ):
             return
         self._start("正式点赞", lambda: self._run_job(False))
@@ -340,6 +344,7 @@ class App:
             return
         self.cfg.debug_port = port
         self.cfg.skip_session_by_default = bool(self.skip_session_var.get())
+        self.cfg.dingtalk_news = not bool(self.skip_dingtalk_var.get())
 
         # 时间段
         since = self.since_var.get().strip()

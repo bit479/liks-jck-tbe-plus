@@ -51,5 +51,9 @@
   "_列表来源说明": "true = 用新闻站自己的栏目接口枚举（/api/article/lists?section_code=news）。门户那张卡片的接口（card/getArticleList）最多只给 200 篇，7 月的文章根本翻不到；新闻站接口没这个限制（实测新闻资讯共 3286 篇）。拿不到会自动退回门户卡片方式。",
   "site_api": true,
   "site_page_size": 200,
-  "site_max_pages": 50
+  "site_max_pages": 100,
+  "_钉钉版说明": "新版 TBe+（钉钉套壳）左侧的『新闻资讯』栏 = 新闻站全部资讯（各公司订阅号汇总，实测 1.4 万+ 篇）。true = 一起处理这个板块；它很大，建议一定设起始日期，没设时只跑最近 dingtalk_default_days 天。",
+  "dingtalk_news": true,
+  "dingtalk_news_name": "钉钉版e+新闻资讯",
+  "dingtalk_default_days": 7
 }
