@@ -353,18 +353,18 @@ class StatCard(tk.Canvas):
 
         self.create_text(20, 24, text=self._glyph, font=T.icon(9),
                          fill=self._accent, anchor="w")
-        self.create_text(38, 24, text=self._title, font=T.f(9),
+        self.create_text(38, 24, text=self._title, font=T.f(10),
                          fill=C["text2"], anchor="w")
 
-        num_font = T.f(18, True)
+        num_font = T.f(22, True)
         label = f"{self._value:,}"
-        self.create_text(20, 58, text=label, font=num_font,
+        self.create_text(20, 60, text=label, font=num_font,
                          fill=C["text"], anchor="w")
         nw = measure(num_font, label)
-        self.create_text(24 + nw, 61, text=self._unit, font=T.f(9),
+        self.create_text(24 + nw, 64, text=self._unit, font=T.f(9),
                          fill=C["text3"], anchor="w")
         if self._note:
-            self.create_text(w - 16, 60, text=self._note, font=T.f(9),
+            self.create_text(w - 16, 62, text=self._note, font=T.f(9),
                              fill=C["text3"], anchor="e")
 
 
@@ -791,9 +791,10 @@ class ScrollArea(tk.Frame):
 
 # ---------------------------------------------------------------- 日志
 class LogView(tk.Frame):
-    """日志控制台：浅底等宽字，按内容上色，支持"只看关键 / 只看问题"。
+    """事件查看器：时间 + 级别 + 消息 三列，紧凑、可筛选、可暂停滚动。
 
-    没有内容时显示空状态，避免一片空白让人以为界面坏了。
+    时间取"界面收到这一行的时刻"（引擎不产出时间戳，不虚构服务端时间）；
+    级别由内容推导；明细行可折叠。
     """
 
     LEVELS = {
@@ -806,17 +807,22 @@ class LogView(tk.Frame):
         "err": C["err"],
         "like": C["accent"],
     }
+    CODES = {"dim": "INFO", "text2": "INFO", "text": "INFO", "accent": "INFO",
+             "like": "INFO", "ok": " OK ", "warn": "WARN", "err": "ERR "}
+    CODE_COLORS = {"INFO": C["text3"], " OK ": C["ok"],
+                   "WARN": C["warn"], "ERR ": C["err"]}
 
     def __init__(self, master, bg: str = C["term"], size: int = 9,
-                 empty_hint: str = "还没有日志。"):
+                 empty_title: str = "还没有日志",
+                 empty_hint: str = "点「准备并接管客户端」，或直接点「开始点赞」"):
         super().__init__(master, bg=bg, highlightthickness=0, bd=0)
         self._bg = bg
         self.text = tk.Text(
-            self, bg=bg, fg=C["log_text"], font=(T.MONO, size),
+            self, bg=bg, fg=C["text"], font=(T.MONO, size),
             relief="flat", bd=0, highlightthickness=0, wrap="word",
-            state="disabled", insertwidth=0, padx=14, pady=12, height=6,
-            spacing1=1, spacing3=2, selectbackground=C["accent_soft"],
-            selectforeground=C["text"],
+            state="disabled", insertwidth=0, padx=14, pady=10, height=6,
+            spacing1=2, spacing3=2, tabs=(60, 100),
+            selectbackground=C["accent_soft"], selectforeground=C["text"],
         )
         self.scroll = SlimScroll(self, self.text, bg=bg)
         self.text.pack(side="left", fill="both", expand=True)
@@ -824,13 +830,23 @@ class LogView(tk.Frame):
 
         for name, color in self.LEVELS.items():
             self.text.tag_configure(name, foreground=color)
+        for code, color in self.CODE_COLORS.items():
+            self.text.tag_configure(code, foreground=color)
         self.text.tag_configure("head", font=(T.MONO, size, "bold"))
         self.text.tag_configure("detail", elide=False)
         self.text.tag_configure("quiet", elide=False)
 
-        self.empty = tk.Label(self, text=empty_hint, font=T.f(9),
-                              fg=C["text3"], bg=bg)
-        self.empty.place(relx=0.5, rely=0.5, anchor="center")
+        # 空状态：一个小图标 + 两行说明，不大面积留白
+        self.empty = tk.Frame(self, bg=bg)
+        box = tk.Frame(self.empty, bg=bg)
+        box.place(relx=0.5, rely=0.42, anchor="center")
+        tk.Label(box, text="\uE7C3", font=T.icon(16), fg=C["text3"],
+                 bg=bg).pack()
+        tk.Label(box, text=empty_title, font=T.f(10), fg=C["text2"],
+                 bg=bg).pack(pady=(6, 2))
+        tk.Label(box, text=empty_hint, font=T.f(9), fg=C["text3"],
+                 bg=bg).pack()
+        self.empty.place(relx=0, rely=0, relwidth=1, relheight=1)
 
         self._autoscroll = True
         self._has_content = False
@@ -868,13 +884,19 @@ class LogView(tk.Frame):
         return "text2", "quiet"
 
     # -- 写入
-    def append(self, line: str) -> None:
+    def append(self, line: str, stamp: Optional[str] = None) -> None:
+        import time as _time
+
         level, group = self.classify(line)
         tags = [level, group]
         if level == "accent":
             tags.append("head")
         at_bottom = self.text.yview()[1] >= 0.999
+        now = stamp or _time.strftime("%H:%M:%S")
         self.text.configure(state="normal")
+        self.text.insert("end", f"{now}\t", (group,))
+        self.text.insert("end", f"{self.CODES.get(level, 'INFO')}\t",
+                         (self.CODES.get(level, "INFO"), group))
         self._insert(line, tuple(tags), group)
         line_count = int(self.text.index("end-1c").split(".")[0])
         if line_count > 3000:
@@ -906,10 +928,27 @@ class LogView(tk.Frame):
         self.text.delete("1.0", "end")
         self.text.configure(state="disabled")
         self._has_content = False
-        self.empty.place(relx=0.5, rely=0.5, anchor="center")
+        self.empty.place(relx=0, rely=0, relwidth=1, relheight=1)
 
     def dump(self) -> str:
         return self.text.get("1.0", "end-1c")
+
+    def copy_visible(self) -> str:
+        """复制当前筛选下看得见的内容（折叠的行不复制）。"""
+        out = []
+        for tag_ranges in [("1.0", "end")]:
+            pass
+        # Text 无法直接取"未折叠"文本，按行判断分组标签
+        total = int(self.text.index("end-1c").split(".")[0])
+        for i in range(1, total + 1):
+            line = self.text.get(f"{i}.0", f"{i}.end")
+            tags = self.text.tag_names(f"{i}.0")
+            if "detail" in tags and self._mode in ("key", "issue"):
+                continue
+            if "quiet" in tags and self._mode == "issue":
+                continue
+            out.append(line)
+        return "\n".join(out)
 
     def set_mode(self, mode: str) -> None:
         """all=全部 / key=只看关键 / issue=只看问题。"""
@@ -917,9 +956,111 @@ class LogView(tk.Frame):
         self.text.tag_configure("detail", elide=mode in ("key", "issue"))
         self.text.tag_configure("quiet", elide=mode == "issue")
 
+    def set_autoscroll(self, on: bool) -> None:
+        self._autoscroll = bool(on)
+        if self._autoscroll:
+            self.text.see("end")
+
     def _wheel(self, e) -> str:
         self.text.yview_scroll(-1 if e.delta > 0 else 1, "units")
         return "break"
+
+
+# ---------------------------------------------------------------- 窗口控制按钮
+class IconBtn(tk.Canvas):
+    """标题栏上的窗口控制按钮（最小化 / 最大化 / 关闭）。"""
+
+    def __init__(self, master, glyph: str, command, bg: str,
+                 hover_bg: str, width: int = 44, height: int = 30,
+                 danger: bool = False, size: int = 8):
+        super().__init__(master, width=width, height=height, bg=bg,
+                         highlightthickness=0, bd=0, cursor="hand2")
+        self._glyph = glyph
+        self._command = command
+        self._bg = bg
+        self._hover_bg = hover_bg
+        self._danger = danger
+        self._cw, self._ch = width, height
+        self._size = size
+        self._hover = False
+        self.bind("<Enter>", lambda _e: self._paint(True))
+        self.bind("<Leave>", lambda _e: self._paint(False))
+        self.bind("<Button-1>", lambda _e: command())
+        self._paint(False)
+
+    def set_glyph(self, glyph: str) -> None:
+        self._glyph = glyph
+        self._paint(self._hover)
+
+    def _paint(self, hover: bool) -> None:
+        self._hover = hover
+        self.delete("all")
+        if hover:
+            self.create_rectangle(0, 0, self._cw, self._ch,
+                                  fill="#DC2626" if self._danger else self._hover_bg,
+                                  outline="")
+        self.create_text(self._cw / 2, self._ch / 2, text=self._glyph,
+                         font=T.icon(self._size),
+                         fill="#FFFFFF" if (hover and self._danger) else C["nav_text"])
+
+
+# ---------------------------------------------------------------- 版本入口卡
+class ModeCard(tk.Canvas):
+    """入口页的大卡片：图标 + 名称 + 说明 + 标签，整块可点。"""
+
+    def __init__(self, master, image, title: str, desc: str, tags: list,
+                 command, width: int = 330, height: int | None = None,
+                 bg: str = C["bg"]):
+        # 说明文字要按实际字号换行，高度就不能写死——先在不可见 Label 上量一次
+        if height is None:
+            probe = tk.Label(master, text=desc, font=T.f(9),
+                             wraplength=width - 56, justify="left")
+            desc_h = probe.winfo_reqheight()
+            probe.destroy()
+            height = 76 + desc_h + 26 + 28
+        super().__init__(master, width=width, height=height, bg=bg,
+                         highlightthickness=0, bd=0, cursor="hand2")
+        self._img = image
+        self._title = title
+        self._desc = desc
+        self._tags = tags
+        self._command = command
+        self._cw, self._ch = width, height
+        self._hover = False
+        self.bind("<Enter>", lambda _e: self._paint(True))
+        self.bind("<Leave>", lambda _e: self._paint(False))
+        self.bind("<Button-1>", lambda _e: command())
+        self._paint(False)
+
+    def _paint(self, hover: bool) -> None:
+        self._hover = hover
+        self.delete("all")
+        w, h = self._cw, self._ch
+        round_rect(self, 1, 1, w - 1, h - 1, T.RADIUS_CARD + 2,
+                   fill=C["surface"],
+                   outline=C["accent"] if hover else C["stroke"],
+                   width=2 if hover else 1)
+        if hover:
+            round_rect(self, 1, 1, w - 1, h - 1, T.RADIUS_CARD + 2,
+                       fill=C["accent_soft"], outline="", width=0)
+            self.tag_lower("all")
+        self.create_image(34, 40, image=self._img, anchor="center")
+        self.create_text(66, 32, text=self._title, font=T.f(13, True),
+                         fill=C["text"], anchor="w")
+        # 说明按宽度折行
+        self.create_text(28, 78, text=self._desc, font=T.f(9), fill=C["text2"],
+                         anchor="nw", width=w - 56, justify="left")
+        y = h - 34
+        x = 28
+        for text in self._tags:
+            tw = measure(T.f(8), text) + 20
+            round_rect(self, x, y - 11, x + tw, y + 11, 11,
+                       fill=C["accent_soft"] if hover else C["surface_hi"],
+                       outline="", width=0)
+            self.create_text(x + 10, y, text=text, font=T.f(8),
+                             fill=C["accent_hi"] if hover else C["text2"],
+                             anchor="w")
+            x += tw + 8
 
 
 # ---------------------------------------------------------------- 文本 / 输入

@@ -17,16 +17,20 @@ from pathlib import Path
 APP_USER_MODEL_ID = "TBePlus.AutoLike.1"
 
 
-def _icon_path() -> Path:
+def _asset_dir() -> Path:
     """源码运行取仓库 assets/；打包后取 PyInstaller 解包目录里的 assets/。"""
     if getattr(sys, "frozen", False):
         base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
     else:
         base = Path(__file__).resolve().parents[1]
-    return base / "assets" / "app.ico"
+    return base / "assets"
 
 
-ICON_PATH = _icon_path()
+def asset(name: str) -> Path:
+    return _asset_dir() / name
+
+
+ICON_PATH = asset("app.ico")
 
 
 def set_app_user_model_id() -> None:
