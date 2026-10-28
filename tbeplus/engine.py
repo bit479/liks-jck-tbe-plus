@@ -135,6 +135,10 @@ class SectionResult:
         return self.stats.get("already-liked", 0)
 
 
+class DingtalkTokenRequired(RuntimeError):
+    """钉钉版必须接管 token，绝不允许回退到旧版 TBe+ 客户端会话。"""
+
+
 class LikeEngine:
     def __init__(
         self,
@@ -181,8 +185,10 @@ class LikeEngine:
                 return True
             self.log(f"  {source} 里的 token 已失效，继续找…")
 
-        # 从已登录客户端进程内存里找（新版钉钉优先）
-        token = await asyncio.to_thread(scan_token_in_memory)
+        # 从已登录客户端进程内存里找。钉钉版只读 TBeHome，绝不读旧版 TBe。
+        images = ("TBeHome.exe",) if (self.cfg.dingtalk_news and not self.cfg.portal_cards) else (
+            "TBeHome.exe", "TBe.exe")
+        token = await asyncio.to_thread(scan_token_in_memory, images)
         if token:
             api = NewsApi(token, self.cfg.api_base, timeout=self.cfg.api_request_timeout)
             if await asyncio.to_thread(api.check):
@@ -191,6 +197,11 @@ class LikeEngine:
                 remember_token(state_path, token, "客户端内存")
                 self.log("  认证：从客户端内存取到 token，已缓存到 state.json（纯 HTTP 模式）")
                 return True
+        if self.cfg.dingtalk_news and not self.cfg.portal_cards:
+            raise DingtalkTokenRequired(
+                "钉钉版必须先在「账号与连接」里接管 token；"
+                "本模式不会启动或使用旧版 TBe+ 客户端。"
+            )
         self.log("  没有可用的新闻站 token，改用客户端会话")
         return False
 

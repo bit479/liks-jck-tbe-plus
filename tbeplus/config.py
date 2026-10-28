@@ -58,6 +58,9 @@ DEFAULTS: Dict[str, Any] = {
     # 这个板块很大，建议配合起始日期使用。
     "dingtalk_news": True,
     "dingtalk_news_name": "钉钉版e+新闻资讯",
+    # 新版客户端主程序（TBeHome.exe）。留空自动查找；
+    # 只接受 TBeHome.exe，绝不接受旧版 TBe.exe。
+    "dingtalk_exe": "",
     # 钉钉版新闻有 1.4 万篇，没设起始日期时默认只跑最近几天
     "dingtalk_default_days": 7,
 
@@ -182,6 +185,7 @@ class Config:
     skip_session_by_default: bool = False
     dingtalk_news: bool = True
     dingtalk_news_name: str = "钉钉版e+新闻资讯"
+    dingtalk_exe: str = ""
     dingtalk_default_days: int = 7
 
     portal_url_hint: str = "miniapp://portal"

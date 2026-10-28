@@ -247,12 +247,15 @@ def _scan_process(pid: int, found: Dict[str, int], budget: int = 400) -> None:
         kernel32.CloseHandle(handle)
 
 
-def scan_token_in_memory() -> str:
-    """从已登录客户端进程里读 tbea_art_token（新版优先）。找不到返回空串。"""
+def scan_token_in_memory(images=("TBeHome.exe", "TBe.exe")) -> str:
+    """从已登录客户端进程里读 tbea_art_token（新版优先）。找不到返回空串。
+
+    钉钉版会传入 ``images=("TBeHome.exe",)``，确保不会误读旧版客户端。
+    """
     if os.name != "nt":
         return ""
     found: Dict[str, int] = {}
-    for image in ("TBeHome.exe", "TBe.exe"):
+    for image in images:
         for pid in _pids(image)[:4]:
             _scan_process(pid, found)
         if found:

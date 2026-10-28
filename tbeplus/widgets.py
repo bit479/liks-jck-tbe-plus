@@ -359,7 +359,7 @@ class StatCard(tk.Canvas):
         unit: str = "篇",
         note: str = "等待运行",
     ):
-        super().__init__(master, width=10, height=88, bg=C["bg"],
+        super().__init__(master, width=10, height=86, bg=C["bg"],
                          highlightthickness=0, bd=0)
         self._title = title
         self._accent = accent
@@ -367,6 +367,7 @@ class StatCard(tk.Canvas):
         self._unit = unit
         self._note = note
         self._value = 0
+        self._total: Optional[int] = None
         self._hover = False
         self._hover_mix = 0.0
         self._pulse = 0.0
@@ -417,10 +418,13 @@ class StatCard(tk.Canvas):
                        done=lambda: self.delete(mask), delay=delay)
 
     def set(self, value: int, note: Optional[str] = None,
-            accent: Optional[str] = None) -> None:
+            accent: Optional[str] = None,
+            total: Optional[int] = None) -> None:
         value = int(value)
         changed = value != self._value
         self._value = value
+        if total is not None:
+            self._total = int(total)
         if note is not None:
             self._note = note
         if accent:
@@ -456,15 +460,29 @@ class StatCard(tk.Canvas):
         self.create_text(38, 24, text=self._title, font=T.f(10),
                          fill=C["text2"], anchor="w")
 
-        num_font = T.f(22, True)
+        num_font = T.f(20, True)
         label = f"{self._value:,}"
-        self.create_text(20, 60, text=label, font=num_font,
+        self.create_text(20, 52, text=label, font=num_font,
                          fill=blend(C["text"], self._accent, self._pulse), anchor="w")
         nw = measure(num_font, label)
-        self.create_text(24 + nw, 64, text=self._unit, font=T.f(9),
-                         fill=C["text3"], anchor="w")
-        if self._note:
-            self.create_text(w - 16, 62, text=self._note, font=T.f(9),
+        x = 24 + nw
+        if self._total is not None:
+            total_font = T.f(9)
+            total_label = f"/ {self._total:,} {self._unit}"
+            self.create_text(x, 56, text=total_label, font=total_font,
+                             fill=C["text3"], anchor="w")
+            if self._total:
+                frac = min(1.0, self._value / self._total)
+                round_rect(self, 20, h - 8, w - 20, h - 4, 2,
+                           fill=C["surface_hi"], outline="", width=0)
+                round_rect(self, 20, h - 8, 20 + (w - 40) * frac, h - 4, 2,
+                           fill=self._accent, outline="", width=0)
+        else:
+            self.create_text(x, 56, text=self._unit, font=T.f(9),
+                             fill=C["text3"], anchor="w")
+        if self._note and (self._total is not None or w >= 190) and w >= 150:
+            note_y = 24 if self._total is not None else 54
+            self.create_text(w - 16, note_y, text=self._note, font=T.f(9),
                              fill=C["text3"], anchor="e")
 
 
@@ -520,6 +538,106 @@ class Bar(tk.Canvas):
         if self._display_frac > 0:
             round_rect(self, 0, 0, max(h, w * self._display_frac), h, r,
                        fill=self._color, outline="", width=0)
+
+
+# ---------------------------------------------------------------- 流程步骤
+class Steps(tk.Canvas):
+    """三/四步流程：连接 → 读取 → 点赞。active=蓝，done=绿，error=红。"""
+
+    def __init__(self, master, labels, height: int = 38,
+                 bg: Optional[str] = None):
+        super().__init__(master, width=10, height=height,
+                         bg=bg or C["surface"], highlightthickness=0, bd=0)
+        self._labels = list(labels)
+        self._states = ["idle"] * len(labels)
+        self._ch = height
+        self.bind("<Configure>", lambda _e: self._draw())
+
+    def set_states(self, states) -> None:
+        states = list(states)[:len(self._labels)]
+        states += ["idle"] * (len(self._labels) - len(states))
+        if states == self._states:
+            return
+        self._states = states
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        w = self.winfo_width()
+        if w <= 10:
+            return
+        n = len(self._labels)
+        col = w / n
+        cy = 12
+        for i, label in enumerate(self._labels):
+            state = self._states[i]
+            cx = col * i + 14
+            color = {
+                "idle": C["stroke_hi"], "active": C["accent"],
+                "done": C["ok"], "error": C["err"],
+            }.get(state, C["stroke_hi"])
+            if state == "active":
+                self.create_oval(cx - 8, cy - 8, cx + 8, cy + 8,
+                                 fill=C["accent_soft"], outline="")
+            self.create_oval(cx - 6, cy - 6, cx + 6, cy + 6,
+                             fill=color, outline="")
+            if state == "done":
+                self.create_text(cx, cy, text="\uE73E", font=T.icon(6),
+                                 fill=C["on_dark"])
+            elif state == "error":
+                self.create_text(cx, cy, text="\uE711", font=T.icon(6),
+                                 fill=C["on_dark"])
+            else:
+                self.create_text(cx, cy, text=str(i + 1), font=T.f(7, True),
+                                 fill=C["on_dark"] if state != "idle" else C["text3"])
+            self.create_text(cx + 12, cy, text=label, font=T.f(9),
+                             fill=C["text"] if state != "idle" else C["text3"],
+                             anchor="w")
+            if i < n - 1:
+                x1 = cx + 12 + measure(T.f(9), label) + 8
+                x2 = col * (i + 1) + 2
+                if x2 > x1:
+                    self.create_line(x1, cy, x2, cy, fill=C["stroke"], width=1)
+
+
+# ---------------------------------------------------------------- 堆叠分布条
+class SegBar(tk.Canvas):
+    """处理进度分布：已点赞 / 原本已赞 / 待处理 / 失败。"""
+
+    def __init__(self, master, height: int = 14, bg: Optional[str] = None):
+        super().__init__(master, width=10, height=height,
+                         bg=bg or C["surface"], highlightthickness=0, bd=0)
+        self._ch = height
+        self._values: list = []
+        self._colors: list = []
+        self.bind("<Configure>", lambda _e: self._draw())
+
+    def set(self, values, colors) -> None:
+        self._values = [max(0.0, float(v)) for v in values]
+        self._colors = list(colors)
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        w = self.winfo_width()
+        if w <= 6:
+            return
+        total = sum(self._values)
+        if total <= 0:
+            round_rect(self, 0, 2, w, self._ch - 2, (self._ch - 4) / 2,
+                       fill=C["surface_hi"], outline="", width=0)
+            return
+        x = 0.0
+        for value, color in zip(self._values, self._colors):
+            if value <= 0:
+                continue
+            span = w * value / total
+            if span < 3:
+                x += span
+                continue
+            round_rect(self, x, 2, min(w, x + span), self._ch - 2,
+                       (self._ch - 4) / 2, fill=color, outline="", width=0)
+            x += span
 
 
 # ---------------------------------------------------------------- 胶囊 / 开关
@@ -1200,6 +1318,186 @@ class LogView(tk.Frame):
 
     def set_mode(self, mode: str) -> None:
         """all=全部 / key=只看关键 / issue=只看问题。"""
+        self._mode = mode
+        self.text.tag_configure("detail", elide=mode in ("key", "issue"))
+        self.text.tag_configure("quiet", elide=mode == "issue")
+
+    def set_autoscroll(self, on: bool) -> None:
+        self._autoscroll = bool(on)
+        if self._autoscroll:
+            self.text.see("end")
+
+    def _wheel(self, e) -> str:
+        self.text.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        return "break"
+
+
+# ---------------------------------------------------------------- 日志表格
+class LogTable(tk.Frame):
+    """概览页的实时日志表：时间 / 级别 / 进度 / 状态 / 资讯标题。
+
+    用 Text 的五列制表位实现，避免几千行 Treeview 的样式与性能问题。
+    系统消息把内容放「资讯标题」列，进度和状态显示“—”。
+    """
+
+    TABS = (62, 112, 168, 244)
+    HEADERS = ("时间", "级别", "进度", "状态", "资讯标题")
+
+    STATUS_COLOR = {
+        "新点赞": C["ok"], "已确认点赞": C["ok"], "liked": C["ok"],
+        "digg-sent": C["ok"],
+        "原本已点赞": C["text3"], "already-liked": C["text3"],
+        "待点赞": C["accent"], "dry-run": C["accent"],
+        "点赞失败": C["err"], "读状态失败": C["err"], "没看到状态变化": C["err"],
+        "like-failed": C["err"], "read-failed": C["err"], "no-change": C["err"],
+        "need-login": C["err"],
+        "点赞已受理待复查": C["warn"], "like-unconfirmed": C["warn"],
+        "digg-unconfirmed": C["warn"],
+        "板块": C["accent_hi"], "小结": C["ok_deep"], "问题": C["err"],
+        "提示": C["warn"],
+    }
+
+    def __init__(self, master, bg: str = C["term"], size: int = 9,
+                 empty_title: str = "还没有日志",
+                 empty_hint: str = "点上方「开始任务」或「试运行」"):
+        super().__init__(master, bg=bg, highlightthickness=0, bd=0)
+        self._bg = bg
+        self._rows = 0
+        self._search = ""
+        self._has_content = False
+        self._autoscroll = True
+        self._mode = "all"
+        self.text = tk.Text(
+            self, bg=bg, fg=C["text"], font=(T.MONO, size),
+            relief="flat", bd=0, highlightthickness=0, wrap="none",
+            state="disabled", insertwidth=0, padx=0, pady=8, height=6,
+            spacing1=3, spacing3=3, tabs=self.TABS,
+            selectbackground=C["accent_soft"], selectforeground=C["text"],
+        )
+        self.scroll = SlimScroll(self, self.text, bg=bg)
+        self.text.pack(side=LEFT, fill=BOTH, expand=True)
+        self.scroll.pack(side=RIGHT, fill=Y, padx=(0, 4))
+
+        for name, color in LogView.LEVELS.items():
+            self.text.tag_configure(name, foreground=color)
+        for code, color in LogView.CODE_COLORS.items():
+            self.text.tag_configure(code, foreground=color)
+        self.text.tag_configure("head", font=(T.MONO, size, "bold"))
+        self.text.tag_configure("detail", elide=False)
+        self.text.tag_configure("quiet", elide=False)
+        self.text.tag_configure("hide", elide=True)
+        self.text.tag_configure("hit", background=C["warn_soft"])
+        self.text.tag_configure("status-like", foreground=C["ok"])
+        self.text.tag_configure("status-skip", foreground=C["text3"])
+        self.text.tag_configure("status-fail", foreground=C["err"])
+        self.text.tag_configure("status-run", foreground=C["accent"])
+        self.text.bind("<MouseWheel>", self._wheel)
+
+        self.empty = tk.Frame(self, bg=bg)
+        box = tk.Frame(self.empty, bg=bg)
+        box.place(relx=0.5, rely=0.42, anchor="center")
+        tk.Label(box, text="\uE7C3", font=T.icon(16), fg=C["text3"],
+                 bg=bg).pack()
+        tk.Label(box, text=empty_title, font=T.f(10), fg=C["text2"],
+                 bg=bg).pack(pady=(6, 2))
+        tk.Label(box, text=empty_hint, font=T.f(9), fg=C["text3"],
+                 bg=bg).pack()
+        self.empty.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+    @staticmethod
+    def parse(line: str) -> tuple:
+        level, group = LogView.classify(line)
+        s = line.strip()
+        progress, status, title = "—", "—", s
+        m = re.search(r"\[(\d+)\s*/\s*(\d+)\]", s)
+        if m:
+            progress = f"{m.group(1)}/{m.group(2)}"
+            rest = s[m.end():].strip()
+            rest = re.sub(r"^\d{2}-\d{2}\s*", "", rest)
+            for label in DETAIL_LABELS:
+                pos = rest.find(label)
+                if pos >= 0:
+                    status = label
+                    after = rest[pos + len(label):]
+                    after = re.sub(r"^\([^)]*\)\s*", "", after)
+                    title = after.strip() or rest
+                    break
+            else:
+                title = rest
+        elif group == "quiet" and level in ("accent", "ok", "warn", "err"):
+            status = {"accent": "板块", "ok": "小结",
+                      "warn": "提示", "err": "问题"}[level]
+            title = s
+        return level, group, progress, status, title
+
+    def append(self, line: str, stamp: Optional[str] = None) -> None:
+        import time as _time
+
+        level, group, progress, status, title = self.parse(line)
+        at_bottom = self.text.yview()[1] >= 0.999
+        now = stamp or _time.strftime("%H:%M:%S")
+        self._rows += 1
+        row = f"row{self._rows}"
+        self.text.configure(state="normal")
+        self.text.insert("end", f"{now}\t", (group, row))
+        self.text.insert("end", f"{LogView.CODES.get(level, 'INFO')}\t",
+                         (LogView.CODES.get(level, "INFO"), group, row))
+        self.text.insert("end", f"{progress}\t", ("text2", group, row))
+        status_tag = self.STATUS_COLOR.get(status, C["text2"])
+        self.text.insert("end", f"{status}\t", (group, row))
+        self.text.insert("end", f"{title}\n", (level if group == "quiet" else "text2", group, row))
+        # 状态列单独上色（只染这一列，标题保持中性）
+        ranges = self.text.tag_ranges(row)
+        if ranges:
+            idx = self.text.search(f"\t{status}\t", str(ranges[0]), str(ranges[1]))
+            if idx:
+                self.text.tag_add("status-col", idx, f"{idx}+{len(status)}c")
+            self.text.tag_configure("status-col", foreground=status_tag)
+        if self._search:
+            self._apply_search_row(row, line)
+        self.text.configure(state="disabled")
+        if at_bottom and self._autoscroll:
+            self.text.see("end")
+        self._has_content = True
+        if self.empty.winfo_ismapped():
+            self.empty.place_forget()
+
+    def _apply_search_row(self, row: str, line: str) -> None:
+        ranges = self.text.tag_ranges(row)
+        if not ranges:
+            return
+        start, end = str(ranges[0]), str(ranges[1])
+        try:
+            self.text.tag_remove("hide", start, end)
+            self.text.tag_remove("hit", start, end)
+            if self._search.lower() in line.lower():
+                self.text.tag_add("hit", start, end)
+            else:
+                self.text.tag_add("hide", start, f"{end}+1c")
+        except tk.TclError:
+            pass
+
+    def set_search(self, query: str) -> None:
+        self._search = query.strip().lower()
+        for i in range(1, self._rows + 1):
+            row = f"row{i}"
+            ranges = self.text.tag_ranges(row)
+            if ranges:
+                line = self.text.get(str(ranges[0]), str(ranges[1]))
+                self._apply_search_row(row, line)
+        if not self._search:
+            self.text.tag_remove("hide", "1.0", "end")
+            self.text.tag_remove("hit", "1.0", "end")
+
+    def clear(self) -> None:
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.configure(state="disabled")
+        self._rows = 0
+        self._has_content = False
+        self.empty.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+    def set_mode(self, mode: str) -> None:
         self._mode = mode
         self.text.tag_configure("detail", elide=mode in ("key", "issue"))
         self.text.tag_configure("quiet", elide=mode == "issue")
