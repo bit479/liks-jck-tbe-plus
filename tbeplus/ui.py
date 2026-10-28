@@ -99,7 +99,7 @@ MODES = {
     },
     "dingtalk": {
         "title": "钉钉版 TBe+",
-        "sub": "新版 TBe+（钉钉套壳）· 新闻资讯：各公司订阅号全部资讯",
+        "sub": "钉钉版 + 新闻资讯 · 自动处理订阅资讯",
         "desc": "新版钉钉套壳客户端左侧的「新闻资讯」，是所有订阅号的\n全部资讯（一万多篇）。建议设起始日期，或用 token 免客户端。",
         "tags": ["可免客户端", "建议设起始日期"],
         "boards": ["钉钉版e+新闻资讯"],
@@ -111,15 +111,17 @@ MODES = {
 
 
 class RadioChips(tk.Frame):
-    """一组只能选一个的胶囊。"""
+    """一组只能选一个的胶囊。solid=True 时选中项为实心蓝底白字（日志筛选）。"""
 
-    def __init__(self, master, options, command=None, bg=C["surface"]):
+    def __init__(self, master, options, command=None, bg=C["surface"],
+                 solid: bool = False):
         super().__init__(master, bg=bg)
         self._command = command
         self.chips: dict = {}
         for key, text in options:
             chip = W.Chip(self, text, False,
-                          command=lambda k=key: self.choose(k), bg=bg)
+                          command=lambda k=key: self.choose(k), bg=bg,
+                          solid=solid)
             chip.pack(side=LEFT, padx=(0, 8))
             self.chips[key] = chip
 
@@ -275,8 +277,15 @@ class App:
 
         left = tk.Frame(bar, bg=C["nav"])
         left.pack(side=LEFT, padx=(14, 0), pady=9)
-        logo = tk.Label(left, image=self._imgs["ico24"], bg=C["nav"], bd=0)
+        logo = tk.Canvas(left, width=24, height=24, bg=C["nav"],
+                         highlightthickness=0, bd=0)
         logo.pack(side=LEFT)
+        W.round_rect(logo, 0, 0, 23, 23, 7, fill=C["nav_sel"],
+                     outline="", width=0)
+        logo.create_text(11.5, 8.5, text="TBe", font=T.f(5, True),
+                         fill=C["on_dark"])
+        logo.create_text(11.5, 16.5, text="+", font=T.f(7, True),
+                         fill=C["on_dark"])
         tk.Label(left, text="TBE+ 自动化中心", font=T.f(10, True),
                  fg=C["nav_text"], bg=C["nav"]).pack(side=LEFT, padx=(9, 0))
 
@@ -486,13 +495,13 @@ class App:
         if self.mode == "dingtalk":
             self._btn_attach_idle = "启动钉钉版 e+"
             self.btn_attach.set_text(self._btn_attach_idle, "\uE8A7")
-            self.btn_run.set_text("开始任务", "\uEB51")
-            self.btn_dry.set_text("试运行", "\uE768")
+            self.btn_run.set_text("开始任务", "\uE768")
+            self.btn_dry.set_text("试运行 · 只看不点赞", "\uE9CE")
         else:
             self._btn_attach_idle = "准备并接管客户端"
             self.btn_attach.set_text(self._btn_attach_idle, "\uE72C")
-            self.btn_run.set_text("开始点赞", "\uEB51")
-            self.btn_dry.set_text(self._btn_dry_idle, "\uE768")
+            self.btn_run.set_text("开始点赞", "\uE768")
+            self.btn_dry.set_text(self._btn_dry_idle, "\uE9CE")
 
     def _intro_home(self) -> None:
         """概览首屏分层出现：统计卡以极短交错淡入，只播一次。"""
@@ -531,7 +540,15 @@ class App:
         self.nav: dict = {}
         brand = tk.Frame(bar, bg=C["nav"])
         brand.pack(fill=X, padx=18, pady=(16, 6))
-        tk.Label(brand, image=self._imgs["ico24"], bg=C["nav"], bd=0).pack(side=LEFT)
+        logo = tk.Canvas(brand, width=28, height=28, bg=C["nav"],
+                         highlightthickness=0, bd=0)
+        logo.pack(side=LEFT)
+        W.round_rect(logo, 0, 0, 27, 27, 8, fill=C["nav_sel"],
+                     outline="", width=0)
+        logo.create_text(13.5, 10, text="TBe", font=T.f(6, True),
+                         fill=C["on_dark"])
+        logo.create_text(13.5, 19, text="+", font=T.f(8, True),
+                         fill=C["on_dark"])
         tk.Label(brand, text="TBE+ 自动化中心", font=T.f(12, True),
                  fg=C["on_dark"], bg=C["nav"]).pack(side=LEFT, padx=(10, 0))
 
@@ -623,11 +640,16 @@ class App:
 
         right = tk.Frame(inner, bg=C["bg"])
         right.pack(side=RIGHT)
-        self.elapsed_var = StringVar(value="")
-        tk.Label(right, textvariable=self.elapsed_var, font=(T.MONO, 9),
-                 fg=C["text2"], bg=C["bg"]).pack(side=LEFT, padx=(0, 10))
         self.pill = W.StatusPill(right, "空闲", "idle", bg=C["bg"])
         self.pill.pack(side=LEFT)
+        tk.Frame(right, bg=C["stroke"], width=1, height=18).pack(
+            side=LEFT, fill=Y, padx=12)
+        self.elapsed_var = StringVar(value="")
+        tk.Label(right, textvariable=self.elapsed_var, font=(T.MONO, 9),
+                 fg=C["text2"], bg=C["bg"]).pack(side=LEFT)
+        tk.Label(right, text="\uE77B", font=T.icon(11), fg=C["text2"],
+                 bg=C["accent_soft"], width=2).pack(side=LEFT, padx=(12, 0),
+                                                    ipady=3)
         W.Btn(right, "", lambda: self._show_page(SETTINGS), variant="ghost",
               icon="\uE713", width=30, height=28, pad=4, bg=C["bg"]).pack(
             side=LEFT, padx=(10, 0))
@@ -715,7 +737,7 @@ class App:
                 if self.btn_attach.winfo_manager():
                     self.btn_attach.pack_forget()
             elif not self.btn_attach.winfo_manager():
-                self.btn_attach.pack(side=LEFT, before=self.btn_dry)
+                self.btn_attach.pack(side=LEFT)   # 追加到按钮组最右
         if getattr(self, "log_subtitle", None):
             if compact:
                 self.log_subtitle.pack_forget()
@@ -744,10 +766,10 @@ class App:
 
     def _layout_actions(self, compact: bool) -> None:
         self._btn_attach_idle = "准备接管" if compact else "准备并接管客户端"
-        self._btn_dry_idle = "试运行" if compact else "试运行（只看不点）"
+        self._btn_dry_idle = "试运行" if compact else "试运行 · 只看不点赞"
         if not self.running:
             self.btn_attach.set_text(self._btn_attach_idle, "\uE72C")
-            self.btn_dry.set_text(self._btn_dry_idle, "\uE768")
+            self.btn_dry.set_text(self._btn_dry_idle, "\uE9CE")
 
     # ==================================================================
     # 页：概览
@@ -798,36 +820,36 @@ class App:
         self.run_state = tk.Label(line, text="● 就绪", font=T.f(9),
                                   fg=C["text3"], bg=C["surface"], anchor="w")
         self.run_state.pack(side=LEFT)
-        self.prog_var = StringVar(value="0 / 0 篇")
-        tk.Label(line, textvariable=self.prog_var, font=T.f(12, True),
-                 fg=C["text"], bg=C["surface"]).pack(side=LEFT, padx=(10, 0))
         self.prog_note = StringVar(value="等待开始")
         tk.Label(line, textvariable=self.prog_note, font=T.f(9), fg=C["text3"],
-                 bg=C["surface"]).pack(side=LEFT, padx=(10, 0))
-
-        self.home_bar = W.Bar(left, height=8)
-        self.home_bar.pack(fill=X, pady=(6, 0))
+                 bg=C["surface"]).pack(side=RIGHT, padx=(10, 0))
+        self.home_bar = W.Bar(line, height=8)
+        self.home_bar.pack(side=LEFT, fill=X, expand=True, padx=(14, 0))
+        self.prog_var = StringVar(value="0 / 0 篇")
+        tk.Label(left, textvariable=self.prog_var, font=T.f(16, True),
+                 fg=C["text"], bg=C["surface"], anchor="w").pack(
+            anchor="w", pady=(6, 0))
 
         right = tk.Frame(row, bg=C["surface"])
         right.pack(side=RIGHT, padx=(16, 0))
         self._btn_attach_idle = "准备并接管客户端"
-        self._btn_dry_idle = "试运行（只看不点）"
-        self.btn_attach = W.Btn(right, self._btn_attach_idle, self._on_prepare,
-                                variant="secondary", icon="\uE72C", height=32,
-                                size=9)
-        self.btn_attach.pack(side=LEFT)
+        self._btn_dry_idle = "试运行 · 只看不点赞"
+        self.btn_run = W.Btn(right, "开始点赞", self._on_run, variant="primary",
+                             icon="\uE768", bold=True, width=128, height=34,
+                             size=9)
+        self.btn_run.pack(side=LEFT)
         self.btn_dry = W.Btn(right, self._btn_dry_idle, self._on_dry_run,
-                             variant="secondary", icon="\uE768", height=32,
+                             variant="outline", icon="\uE9CE", height=34,
                              size=9)
         self.btn_dry.pack(side=LEFT, padx=(8, 0))
-        self.btn_run = W.Btn(right, "开始点赞", self._on_run, variant="primary",
-                             icon="\uEB51", bold=True, width=118, height=32,
-                             size=9)
-        self.btn_run.pack(side=LEFT, padx=(8, 0))
         self.btn_stop = W.Btn(right, "停止", self._on_stop, variant="danger",
-                              icon="\uE71A", width=76, height=32, size=9)
+                              icon="\uE71A", width=64, height=34, size=9)
         self.btn_stop.pack(side=LEFT, padx=(8, 0))
         self.btn_stop.set_enabled(False)
+        self.btn_attach = W.Btn(right, self._btn_attach_idle, self._on_prepare,
+                                variant="secondary", icon="\uE72C", height=34,
+                                size=9)
+        self.btn_attach.pack(side=LEFT, padx=(8, 0))
 
         self.steps = W.Steps(body, ("连接客户端", "读取资讯", "执行点赞"))
         self.steps.pack(fill=X, padx=20, pady=(4, 0))
@@ -919,22 +941,24 @@ class App:
         self.log_subtitle = tk.Label(lhead, text="连接、读取、点赞全过程",
                                      font=T.f(9), fg=C["text3"], bg=C["surface"])
         self.log_subtitle.pack(side=LEFT, padx=10)
-        W.Btn(lhead, "全部记录", lambda: self._show_page(LOG), variant="ghost",
-              icon="\uE76C", width=90, height=26, size=9,
-              bg=C["surface"]).pack(side=RIGHT)
-        self.pause_chip = W.Chip(lhead, "暂停滚动", False,
-                                 command=self._on_pause_toggle, bg=C["surface"],
-                                 height=26, size=8)
-        self.pause_chip.pack(side=RIGHT, padx=(0, 6))
+        W.Btn(lhead, "查看全部日志", lambda: self._show_page(LOG),
+              variant="link", icon="\uE76C", height=26, size=9,
+              pad=6, bg=C["surface"]).pack(side=RIGHT)
+        self.pause_chip = W.Switch(lhead, False, command=self._on_pause_toggle,
+                                   bg=C["surface"])
+        self.pause_chip.pack(side=RIGHT, padx=(0, 10))
+        tk.Label(lhead, text="暂停滚动", font=T.f(9), fg=C["text2"],
+                 bg=C["surface"]).pack(side=RIGHT, padx=(0, 6))
         self.log_search_var = StringVar(value="")
-        search = W.entry(lhead, self.log_search_var, width=16, size=9)
+        search = W.entry(lhead, self.log_search_var, width=18, size=9)
         search.pack(side=RIGHT, padx=(0, 6), ipady=3)
+        self._log_search_ph(search, "搜索资讯标题或内容…")
         search.bind("<KeyRelease>", lambda _e: self._on_log_search())
         tk.Label(lhead, text="\uE721", font=T.icon(8), fg=C["text3"],
                  bg=C["surface"]).pack(side=RIGHT, padx=(0, 4))
         self.home_quick = RadioChips(
             lhead, (("all", "全部"), ("key", "关键"), ("issue", "问题")),
-            command=self._on_home_filter)
+            command=self._on_home_filter, solid=True)
         self.home_quick.pack(side=RIGHT, padx=(0, 8))
         self.home_quick.choose("all", notify=False)
 
@@ -942,8 +966,8 @@ class App:
         colhead = tk.Canvas(lb, bg=C["term"], height=20,
                             highlightthickness=0, bd=0)
         colhead.pack(fill=X, padx=(0, 10), pady=(4, 0))
-        for text, x in (("时间", 0), ("级别", 62), ("进度", 112),
-                        ("状态", 168), ("资讯标题", 244)):
+        for text, x in (("时间", 0), ("级别", 64), ("进度", 118),
+                        ("状态", 176), ("资讯标题", 276)):
             colhead.create_text(x, 10, text=text, font=T.f(8),
                                 fill=C["text3"], anchor="w")
 
@@ -955,8 +979,35 @@ class App:
         tk.Label(f, textvariable=self.footer_var, font=T.f(8), fg=C["text3"],
                  bg=C["bg"], anchor="w").pack(fill=X, pady=(4, 0))
 
+    def _log_search_ph(self, box, placeholder: str) -> None:
+        """搜索框占位文案：空且未聚焦时显示灰色提示。"""
+        state = {"ph": False}
+
+        def show(_e=None):
+            if not self.log_search_var.get():
+                state["ph"] = True
+                box.configure(fg=C["text3"])
+                self.log_search_var.set(placeholder)
+
+        def hide(_e=None):
+            if state["ph"]:
+                state["ph"] = False
+                self.log_search_var.set("")
+            box.configure(fg=C["text"])
+
+        def on_press(_e):
+            if state["ph"]:
+                hide()
+
+        box.bind("<FocusIn>", hide, add="+")
+        box.bind("<FocusOut>", lambda e: (show() if not self.log_search_var.get()
+                                          else None), add="+")
+        box.bind("<KeyPress>", on_press, add="+")
+        show()
+
     def _on_log_search(self) -> None:
-        self.home_log.set_search(self.log_search_var.get())
+        q = self.log_search_var.get()
+        self.home_log.set_search("" if q == "搜索资讯标题或内容…" else q)
 
     def _on_pause_toggle(self) -> None:
         on = self.pause_chip.get()
@@ -986,7 +1037,7 @@ class App:
               width=80, height=28, size=9).pack(side=RIGHT, padx=(0, 8))
         self.log_quick = RadioChips(
             head, (("all", "全部"), ("key", "只看关键"), ("issue", "只看问题")),
-            command=self._on_log_filter)
+            command=self._on_log_filter, solid=True)
         self.log_quick.pack(side=RIGHT, padx=(0, 14))
         self.log_quick.choose("all", notify=False)
 

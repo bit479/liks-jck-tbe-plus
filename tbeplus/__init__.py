@@ -9,5 +9,5 @@
     ui       图形界面
 """
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 __all__ = ["config", "ws", "cdp", "client", "dingtalk", "engine", "ui", "motion"]

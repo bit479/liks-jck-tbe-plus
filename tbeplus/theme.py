@@ -10,8 +10,8 @@ from __future__ import annotations
 
 # ---------------------------------------------------------------- 配色
 C = {
-    # 底色：页面浅灰，卡片纯白
-    "bg": "#F3F5F8",
+    # 底色：页面浅灰（设计稿 #F5F7FB），卡片纯白
+    "bg": "#F5F7FB",
     "surface": "#FFFFFF",
     "surface_alt": "#F8FAFC",     # 表头、代码块这类次级面
     "surface_hi": "#F1F5F9",      # 输入框、次级按钮
@@ -27,11 +27,11 @@ C = {
     "text2": "#64748B",
     "text3": "#94A3B8",
 
-    # 主操作色
-    "accent": "#2563EB",
-    "accent_hi": "#1D4ED8",
-    "accent_soft": "#EFF4FF",
-    "accent_line": "#BFD3FE",
+    # 主操作色（设计稿：品牌主色 #2864F0）
+    "accent": "#2864F0",
+    "accent_hi": "#1B4FD0",
+    "accent_soft": "#EAF1FE",
+    "accent_line": "#C3D6FB",
 
     # 语义色
     "ok": "#16A34A",
@@ -44,14 +44,16 @@ C = {
     "err_soft": "#FEF2F2",
     "err_line": "#FECACA",
 
-    # 左侧深色导航（唯一的大面积深色）
-    "nav": "#172536",
-    "nav_active": "#203247",
-    "nav_hover": "#1D2E41",
+    # 左侧深色导航（设计稿：深海军蓝 #14243A）
+    "nav": "#14243A",
+    "nav_active": "#1E3048",
+    "nav_hover": "#1B2C42",
     "nav_text": "#E2E8F0",
     "nav_muted": "#94A3B8",
     "nav_line": "#24384F",
     "nav_accent": "#60A5FA",
+    "nav_sel": "#2864F0",          # 选中项：品牌蓝底（设计稿蓝色选中态）
+    "nav_sel_hover": "#3D75F2",    # 选中项悬停：蓝底微亮
 
     # 深色导航上的文字/图标
     "on_dark": "#FFFFFF",         # 导航上的主文字
@@ -70,9 +72,9 @@ C = {
     # 日志控制台：浅灰底，靠文字颜色区分级别
     "term": "#F8FAFC",
     "log_text": "#334155",
-    "like": "#2563EB",        # "新点赞"用主色，语义上不是警报
-    "like_hi": "#1D4ED8",
-    "like_soft": "#EFF4FF",
+    "like": "#2864F0",        # "新点赞"用主色，语义上不是警报
+    "like_hi": "#1B4FD0",
+    "like_soft": "#EAF1FE",
 }
 
 # ---------------------------------------------------------------- 字体

@@ -169,6 +169,9 @@ class Btn(tk.Canvas):
         "secondary": (C["surface"], C["surface_hi"], C["text"], C["stroke_hi"]),
         "ghost": (None, C["surface_hi"], C["text2"], None),
         "danger": (C["surface"], C["err_soft"], C["err"], C["err_line"]),
+        # 设计稿：试运行=蓝色描边次按钮；查看全部日志=蓝色文字链接
+        "outline": (C["surface"], C["accent_soft"], C["accent"], C["accent_line"]),
+        "link": (None, C["accent_soft"], C["accent"], None),
     }
 
     def __init__(
@@ -653,12 +656,14 @@ class Chip(tk.Canvas):
         height: int = 28,
         size: int = 9,
         bg: Optional[str] = None,
+        solid: bool = False,
     ):
         self._text = text
         self._font = T.f(size)
         self._value = value
         self._command = command
         self._h = height
+        self._solid = solid
         self._hover = False
         self._mix = 1.0 if value else 0.0
         self._hover_mix = 0.0
@@ -720,6 +725,19 @@ class Chip(tk.Canvas):
     def _draw(self) -> None:
         self.delete("all")
         w, h = self._cw, self._h
+        if self._solid:
+            # 设计稿的日志筛选：选中=实心蓝底白字，未选中=白底灰字细边
+            off_fill = blend(C["surface"], C["surface_hover"], self._hover_mix)
+            off_edge = blend(C["stroke"], C["stroke_hi"], self._hover_mix)
+            fill = blend(off_fill, C["accent"], self._mix)
+            fill = blend(fill, C["accent_hi"], self._hover_mix * self._mix)
+            edge = blend(off_edge, C["accent"], self._mix)
+            fg = blend(C["slate"], C["on_dark"], self._mix)
+            round_rect(self, 1, 1, w - 1, h - 1, h / 2,
+                       fill=fill, outline=edge, width=1)
+            self.create_text(w / 2, h / 2, text=self._text, font=self._font,
+                             fill=fg, anchor="center")
+            return
         off_fill = blend(C["surface"], C["surface_hover"], self._hover_mix)
         off_edge = blend(C["stroke"], C["stroke_hi"], self._hover_mix)
         fill = blend(off_fill, C["accent_soft"], self._mix)
@@ -940,16 +958,17 @@ class NavItem(tk.Canvas):
     def _draw(self) -> None:
         self.delete("all")
         w, h = self._cw, self._ch
+        # 未选中：nav -> nav_hover -> nav_active 的灰阶过渡；
+        # 选中：整块混到品牌蓝（设计稿的蓝色选中态），悬停时再亮一档。
         hover_bg = blend(C["nav"], C["nav_hover"], self._hover_mix)
-        bg = blend(hover_bg, C["nav_active"], self._active_mix)
+        off_bg = blend(hover_bg, C["nav_active"], self._active_mix)
+        bg = blend(off_bg, C["nav_sel"], self._active_mix)
+        if self._active_mix > 0.01:
+            bg = blend(bg, C["nav_sel_hover"], self._hover_mix * 0.5)
         if self._active_mix > 0.01 or self._hover_mix > 0.01:
             round_rect(self, 0, 2, w, h - 2, 8, fill=bg, outline="", width=0)
-        if self._active_mix > 0.01:
-            round_rect(self, 0, 12, 3, h - 12, 1.5,
-                       fill=blend(C["nav"], C["nav_accent"], self._active_mix),
-                       outline="", width=0)
         fg = blend(C["nav_muted"], C["on_dark"], self._active_mix)
-        icon_fg = blend(C["nav_icon"], C["nav_accent"], self._active_mix)
+        icon_fg = blend(C["nav_icon"], C["on_dark"], self._active_mix)
         if not self._active and self._hover_mix:
             fg = blend(fg, C["nav_text"], self._hover_mix)
             icon_fg = blend(icon_fg, C["nav_muted"], self._hover_mix)
@@ -1340,8 +1359,27 @@ class LogTable(tk.Frame):
     系统消息把内容放「资讯标题」列，进度和状态显示“—”。
     """
 
-    TABS = (62, 112, 168, 244)
+    TABS = (64, 118, 176, 276)
     HEADERS = ("时间", "级别", "进度", "状态", "资讯标题")
+
+    # 级别徽标：浅底 + 语义色文字（设计稿的 INFO/OK/WARN/ERR 小胶囊）
+    BADGE = {
+        "INFO": (C["accent_hi"], C["accent_soft"]),
+        " OK ": (C["ok_deep"], C["ok_soft"]),
+        "WARN": (C["warn_deep"], C["warn_soft"]),
+        "ERR ": (C["err"], C["err_soft"]),
+    }
+    # 状态小图标：已点赞=绿勾、已跳过=中性圈、处理中=蓝点、失败=红叉
+    STATUS_ICON = {
+        "新点赞": "✓ ", "已确认点赞": "✓ ", "liked": "✓ ", "digg-sent": "✓ ",
+        "原本已点赞": "○ ", "already-liked": "○ ",
+        "待点赞": "● ", "dry-run": "● ",
+        "点赞已受理待复查": "● ", "like-unconfirmed": "● ",
+        "digg-unconfirmed": "● ",
+        "点赞失败": "✕ ", "读状态失败": "✕ ", "没看到状态变化": "✕ ",
+        "like-failed": "✕ ", "read-failed": "✕ ", "no-change": "✕ ",
+        "need-login": "✕ ",
+    }
 
     STATUS_COLOR = {
         "新点赞": C["ok"], "已确认点赞": C["ok"], "liked": C["ok"],
@@ -1382,6 +1420,9 @@ class LogTable(tk.Frame):
             self.text.tag_configure(name, foreground=color)
         for code, color in LogView.CODE_COLORS.items():
             self.text.tag_configure(code, foreground=color)
+        for code, (fg, bgc) in self.BADGE.items():
+            self.text.tag_configure(f"badge-{code.strip()}",
+                                    foreground=fg, background=bgc)
         self.text.tag_configure("head", font=(T.MONO, size, "bold"))
         self.text.tag_configure("detail", elide=False)
         self.text.tag_configure("quiet", elide=False)
@@ -1438,21 +1479,25 @@ class LogTable(tk.Frame):
         now = stamp or _time.strftime("%H:%M:%S")
         self._rows += 1
         row = f"row{self._rows}"
+        code = LogView.CODES.get(level, "INFO")
         self.text.configure(state="normal")
         self.text.insert("end", f"{now}\t", (group, row))
-        self.text.insert("end", f"{LogView.CODES.get(level, 'INFO')}\t",
-                         (LogView.CODES.get(level, "INFO"), group, row))
+        self.text.insert("end", f" {code.strip()} \t",
+                         (f"badge-{code.strip()}", group, row))
         self.text.insert("end", f"{progress}\t", ("text2", group, row))
         status_tag = self.STATUS_COLOR.get(status, C["text2"])
-        self.text.insert("end", f"{status}\t", (group, row))
+        self.text.insert("end", f"{self.STATUS_ICON.get(status, '')}{status}\t",
+                         (group, row))
         self.text.insert("end", f"{title}\n", (level if group == "quiet" else "text2", group, row))
-        # 状态列单独上色（只染这一列，标题保持中性）
+        # 状态列单独上色（逐行独立标签，只染这一列，标题保持中性）
         ranges = self.text.tag_ranges(row)
-        if ranges:
-            idx = self.text.search(f"\t{status}\t", str(ranges[0]), str(ranges[1]))
+        cell = f"{self.STATUS_ICON.get(status, '')}{status}"
+        if ranges and status != "—":
+            idx = self.text.search(f"\t{cell}\t", str(ranges[0]), str(ranges[1]))
             if idx:
-                self.text.tag_add("status-col", idx, f"{idx}+{len(status)}c")
-            self.text.tag_configure("status-col", foreground=status_tag)
+                tag = f"st{self._rows}"
+                self.text.tag_configure(tag, foreground=status_tag)
+                self.text.tag_add(tag, idx, f"{idx}+{len(cell)}c")
         if self._search:
             self._apply_search_row(row, line)
         self.text.configure(state="disabled")
