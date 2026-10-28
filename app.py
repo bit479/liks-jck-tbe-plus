@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -35,7 +36,11 @@ def _selftest() -> int:
     ]
     out = base / "selftest.log"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return 0
+    # onefile + windowed 下，导入过 tkinter 后正常 return 偶尔会卡在解释器清理；
+    # 自检只写一个日志，直接退出最稳（PyInstaller 的临时目录留给系统清理）。
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def main() -> int:
