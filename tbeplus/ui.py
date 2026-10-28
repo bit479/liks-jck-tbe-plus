@@ -314,34 +314,49 @@ class App:
             self.root.after(30, lambda: self.root.overrideredirect(True))
 
     def _install_grips(self) -> None:
-        """无边框窗口的边缘拖拽热区（4px，颜色与所在区域一致，看不出来）。"""
-        self._grips: list = []
-        specs = {
-            "n": ("size_ns", C["nav"]), "s": ("size_ns", C["bg"]),
-            "w": ("size_we", C["nav"]), "e": ("size_we", C["bg"]),
-            "nw": ("size_nw_se", C["nav"]), "ne": ("size_ne_sw", C["nav"]),
-            "sw": ("size_ne_sw", C["nav"]), "se": ("size_nw_se", C["bg"]),
+        """无边框窗口的边缘拖拽热区。
+
+        热区是真实控件，颜色必须与它盖住的那块背景一致，否则会在标题栏、
+        深色侧栏上露白。左右两边的高度、底边的分段都按实际布局算。
+        """
+        self._grips: dict = {}
+        cursors = {
+            "n": "size_ns", "s": "size_ns", "s_left": "size_ns",
+            "w": "size_we", "w_top": "size_we",
+            "e": "size_we",
+            "nw": "size_nw_se", "ne": "size_ne_sw",
+            "sw": "size_ne_sw", "se": "size_nw_se",
         }
-        for name, (cursor, color) in specs.items():
-            frame = tk.Frame(self.root, bg=color, cursor=cursor)
+        for name, cursor in cursors.items():
+            frame = tk.Frame(self.root, bg=C["bg"], cursor=cursor)
             frame.bind("<ButtonPress-1>",
                        lambda e, n=name: self._resize_start(e, n))
             frame.bind("<B1-Motion>", self._resize_move)
-            self._grips.append((name, frame))
+            self._grips[name] = frame
 
     def _place_grips(self) -> None:
         if not getattr(self, "_grips", None):
             return
         g = 4
         w, h = self.root.winfo_width(), self.root.winfo_height()
+        side = T.SIDEBAR_W if self.mode else g
+        side_color = C["nav"] if self.mode else C["bg"]
+        # 名称 -> (x, y, 宽, 高, 颜色)。标题栏永远深色，侧栏只在实际显示时深色。
         pos = {
-            "n": (g, 0, w - 2 * g, g), "s": (g, h - g, w - 2 * g, g),
-            "w": (0, g, g, h - 2 * g), "e": (w - g, g, g, h - 2 * g),
-            "nw": (0, 0, g, g), "ne": (w - g, 0, g, g),
-            "sw": (0, h - g, g, g), "se": (w - g, h - g, g, g),
+            "n": (g, 0, max(0, w - 2 * g), g, C["nav"]),
+            "w_top": (0, 0, g, TITLEBAR_H, C["nav"]),
+            "w": (0, TITLEBAR_H, g, max(0, h - TITLEBAR_H - g), side_color),
+            # 标题栏右侧不做热区：会把关闭按钮最右边 4px 压成深色
+            "e": (w - g, TITLEBAR_H, g, max(0, h - TITLEBAR_H - g), C["bg"]),
+            "s_left": (0, h - g, side, g, side_color),
+            "s": (side, h - g, max(0, w - side - g), g, C["bg"]),
+            "nw": (0, 0, g, g, C["nav"]), "ne": (w - g, 0, g, g, C["nav"]),
+            "sw": (0, h - g, g, g, side_color), "se": (w - g, h - g, g, g, C["bg"]),
         }
-        for name, frame in self._grips:
-            x, y, fw, fh = pos[name]
+        for name, frame in self._grips.items():
+            x, y, fw, fh, color = pos[name]
+            if str(frame.cget("bg")) != color:
+                frame.configure(bg=color)
             frame.place(x=x, y=y, width=fw, height=fh)
             frame.lift()
 
@@ -404,6 +419,7 @@ class App:
     def _show_mode_select(self) -> None:
         self.shell.pack_forget()
         self.mode_page.pack(fill=BOTH, expand=True)
+        self._place_grips()
         self.root.after(80, self._reveal_mode_cards)
 
     def _reveal_mode_cards(self) -> None:
@@ -416,6 +432,7 @@ class App:
         self.mode = mode
         self.mode_page.pack_forget()
         self.shell.pack(fill=BOTH, expand=True)
+        self._place_grips()
         self._build_board_chips()
         for name in self.nav:
             self.nav[name].set_active(name == HOME)
@@ -486,9 +503,9 @@ class App:
         footer.pack(side="bottom", fill=X, padx=14, pady=14)
 
         card = W.Panel(footer, radius=9, fill=C["nav_active"],
-                       stroke=C["nav_line"], height=104, bg=C["nav"])
+                       stroke=C["nav_line"], bg=C["nav"])
         card.pack(fill=X)
-        card.pack_propagate(False)
+        self.status_card = card
         body = card.body
         head = tk.Frame(body, bg=C["nav_active"])
         head.pack(fill=X, padx=12, pady=(9, 0))
@@ -507,10 +524,12 @@ class App:
         tk.Label(line, textvariable=self.status_var, font=T.f(10, True),
                  fg=C["on_dark"], bg=C["nav_active"], anchor="w").pack(
             side=LEFT, padx=(6, 0))
-        self.status_note = StringVar(value="")
+        self.status_note = StringVar(value="\u00a0\n\u00a0")
         tk.Label(body, textvariable=self.status_note, font=T.f(8),
                  fg=C["nav_muted"], bg=C["nav_active"], anchor="w",
-                 justify="left").pack(anchor="w", padx=12, pady=(4, 0))
+                 justify="left", wraplength=166).pack(
+            fill=X, padx=12, pady=(4, 2))
+        card.fit(extra=10)
 
         W.Btn(footer, "切换版本", self._switch_mode, variant="ghost",
               icon="\uE8AB", width=T.NAV_W, height=30, size=9,
@@ -1119,18 +1138,19 @@ class App:
         if port:
             self.cfg.debug_port = port
             title = (targets[0][1] if targets else "") or ""
-            title = title[:16] + ("…" if len(title) > 16 else "")
+            title = title[:12] + ("…" if len(title) > 12 else "")
             self.status_var.set("已连接")
             self.status_note.set(f"端口 {port} · 视图 {len(targets)} 个\n{title}")
             self._draw_dot(C["ok"])
         elif running:
             self.status_var.set("未接管")
-            self.status_note.set("TBe+ 在运行，但没有调试端口\n点「准备」重启并接管")
+            self.status_note.set("TBe+ 在运行，无调试端口\n点「准备」重启并接管")
             self._draw_dot(C["warn"])
         else:
             self.status_var.set("未连接")
-            self.status_note.set("没检测到 TBe+ 客户端\n有 token 时可免客户端直接跑")
+            self.status_note.set("没检测到 TBe+ 客户端\n可用 token 免客户端运行")
             self._draw_dot(C["text3"])
+        self.status_card.fit(extra=10)
         self._refresh_adv()
         self._sync_attach_button()
 
