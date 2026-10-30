@@ -700,19 +700,17 @@ class App:
             frame = tk.Frame(host, bg=C["bg"])
             self.pages[key] = frame
             builder(frame)
+            # 所有页面一次性就位、叠在一起；切换时只 lift()。
+            # 避免每次切页重新 place / 重新布局（首页控件多，重排要 190ms 左右，
+            # 表现出来就是"卡白屏"）。
+            frame.place(x=0, y=0, relwidth=1, relheight=1)
 
     def _show_page(self, key: str, animate: bool = True) -> None:
         self.page = key
         target = self.pages.get(key)
-        # 先让目标页就位并置顶，再隐藏其它页：避免切换瞬间没有页面覆盖而露出底色。
+        # 页面常驻叠放，切换只做 lift()，不重新布局 → 无白屏、无卡顿。
         if target is not None:
-            target.place(x=0, y=0, relwidth=1, relheight=1)
             target.lift()
-        for name, frame in self.pages.items():
-            if name != key:
-                frame.place_forget()
-        if target is not None and animate:
-            motion.slide_in(target)
         for name, item in self.nav.items():
             item.set_active(name == key)
         self.title_var.set(PAGE_TITLES[key])
@@ -909,7 +907,7 @@ class App:
         panel.fit(extra=4)
 
         # ---------------- 处理进度 + 运行质量 ----------------
-        mid = tk.Frame(f, bg=C["bg"], height=136)
+        mid = tk.Frame(f, bg=C["bg"], height=148)
         mid.pack(fill=X, pady=(10, 0))
         mid.pack_propagate(False)
         self.mid_row = mid
@@ -949,7 +947,7 @@ class App:
         b2 = p2.body
         self._card_head(b2, "运行质量", "取真实运行结果", pad=(18, 12))
         qrow = tk.Frame(b2, bg=C["surface"])
-        qrow.pack(fill=BOTH, expand=True, padx=18, pady=(12, 0))
+        qrow.pack(fill=BOTH, expand=True, padx=18, pady=(10, 6))
         self.quality_vars = {}
         for i, (key, label, glyph) in enumerate((
             ("rate", "成功率", "\uE73E"),
