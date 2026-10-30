@@ -189,21 +189,10 @@ class _MBI(ctypes.Structure):
 
 
 def _pids(image_name: str) -> List[int]:
-    try:
-        out = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            encoding="gbk",
-            errors="replace",
-            timeout=20,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
-    return [
-        int(m.group(1))
-        for m in re.finditer(rf'"{re.escape(image_name)}","(\d+)"', out)
-    ]
+    # 纯 Win32 进程快照，不再起 tasklist。钉钉版 watch_token 每 2 秒轮询一次，
+    # 原来的 tasklist 子进程会让运行时一直闪黑框。
+    from . import winproc
+    return winproc.pids(image_name)
 
 
 def _scan_process(pid: int, found: Dict[str, int], budget: int = 400) -> None:

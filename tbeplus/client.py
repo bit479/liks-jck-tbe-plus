@@ -17,6 +17,7 @@ TBe.exe 的位置每台机器可能都不一样，所以这里除了读配置，
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -24,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
 
+from . import winproc
 from .cdp import is_debug_port_open, list_targets
 
 LogFn = Callable[[str], None]
@@ -39,22 +41,6 @@ def _noop(_: str) -> None:
 # ---------------------------------------------------------------------------
 # 基础命令
 # ---------------------------------------------------------------------------
-def _run_powershell(script: str, timeout: float = 25.0) -> str:
-    # 打包成 --windowed 的 exe 后自身没有控制台，子进程默认会闪一个黑框
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            creationflags=flags,
-        )
-        return (result.stdout or "").strip()
-    except Exception:
-        return ""
 
 
 def is_attached(port: int) -> bool:
@@ -63,12 +49,8 @@ def is_attached(port: int) -> bool:
 
 
 def is_client_running() -> bool:
-    # 注意：PowerShell 返回的是字符串 "0"，直接 bool() 会当成真，必须转成数字再判断
-    out = _run_powershell("(Get-Process TBe -ErrorAction SilentlyContinue).Count")
-    try:
-        return int(out.strip()) > 0
-    except ValueError:
-        return False
+    # 纯 Win32 进程快照，不再起 PowerShell / tasklist（避免运行时闪黑框）
+    return bool(winproc.pids("TBe.exe"))
 
 
 def summarize_targets(port: int) -> List[tuple]:
@@ -116,79 +98,77 @@ def _pick_best(paths: Iterable[Path]) -> Optional[Path]:
 
 
 def _from_running_process() -> Optional[Path]:
-    out = _run_powershell(
-        "Get-CimInstance Win32_Process -Filter \"Name='TBe.exe'\" "
-        "-ErrorAction SilentlyContinue | Select-Object -First 1 "
-        "-ExpandProperty ExecutablePath"
-    )
-    return _normalize(out)
+    for pid in winproc.pids("TBe.exe"):
+        path = winproc.exe_path(pid)
+        if path is not None:
+            return _normalize(str(path))
+    return None
 
 
 def _from_shortcuts() -> Optional[Path]:
-    script = (
-        "$sh = New-Object -ComObject WScript.Shell;"
-        "$dirs = @(\"$env:USERPROFILE\\Desktop\",\"$env:PUBLIC\\Desktop\","
-        "\"$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\","
-        "\"$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\");"
-        "Get-ChildItem -Path $dirs -Filter *.lnk -Recurse -ErrorAction SilentlyContinue |"
-        " Where-Object { $_.Name -match 'TBe|特变' } |"
-        " ForEach-Object { $sh.CreateShortcut($_.FullName).TargetPath }"
-    )
+    """从桌面 / 开始菜单的 .lnk 读目标。纯二进制解析，不起子进程。"""
+    dirs = [
+        Path.home() / "Desktop",
+        Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "Desktop",
+        Path(os.environ.get("APPDATA", ""))
+        / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+        Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
+        / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+    ]
     found: List[Path] = []
-    for line in _run_powershell(script).splitlines():
-        path = _normalize(line)
-        if path is None:
+    for directory in dirs:
+        if not directory.is_dir():
             continue
-        found.append(path)
-        # 快捷方式常常指向小启动器，顺手把同目录带版本号的子目录也收进来
-        directory = path.parent
-        if directory.is_dir():
-            for sub in directory.iterdir():
-                if sub.is_dir() and (sub / "TBe.exe").is_file():
-                    found.append(sub / "TBe.exe")
+        try:
+            lnks = list(directory.rglob("*.lnk"))
+        except OSError:
+            continue
+        for lnk in lnks:
+            if "TBe" not in lnk.name and "特变" not in lnk.name:
+                continue
+            target = winproc.lnk_target(lnk)
+            if target is None:
+                continue
+            found.append(target)
+            # 快捷方式常常指向小启动器，顺手把同目录带版本号的子目录也收进来
+            parent = target.parent
+            if parent.is_dir():
+                for sub in parent.iterdir():
+                    if sub.is_dir() and (sub / "TBe.exe").is_file():
+                        found.append(sub / "TBe.exe")
     return _pick_best(found)
 
 
 def _from_uninstall_registry() -> Optional[Path]:
-    script = (
-        "$keys = @('HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
-        "'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
-        "'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*');"
-        "Get-ItemProperty $keys -ErrorAction SilentlyContinue |"
-        " Where-Object { $_.DisplayName -match 'TBe|特变' -or $_.Publisher -match 'tbea' } |"
-        " ForEach-Object { $_.InstallLocation; $_.DisplayIcon; $_.UninstallString }"
-    )
     found: List[Path] = []
-    for line in _run_powershell(script).splitlines():
-        path = _normalize(line)
-        if path is not None:
-            if path.name.lower() == "tbe.exe":
-                found.append(path)
+    for info in winproc.iter_uninstall():
+        blob = " ".join(str(v) for v in info.values())
+        if "tbe" not in blob.lower() and "特变" not in blob:
             continue
-        # 拿到的可能只是目录，或者 unins000.exe
-        text = line.strip().strip('"')
-        if not text:
-            continue
-        directory = Path(text)
-        if directory.is_file():
-            directory = directory.parent
-        if directory.is_dir():
-            for sub in [directory] + [d for d in directory.iterdir() if d.is_dir()]:
-                exe = sub / "TBe.exe"
-                if exe.is_file():
-                    found.append(exe)
+        for field in ("InstallLocation", "DisplayIcon", "UninstallString"):
+            text = str(info.get(field) or "").strip().strip('"')
+            if not text:
+                continue
+            path = _normalize(text)
+            if path is not None:
+                if path.name.lower() == "tbe.exe":
+                    found.append(path)
+                continue
+            # 拿到的可能只是目录，或者 unins000.exe
+            directory = Path(text.split(",")[0])
+            if directory.is_file():
+                directory = directory.parent
+            if directory.is_dir():
+                for sub in [directory] + [d for d in directory.iterdir() if d.is_dir()]:
+                    exe = sub / "TBe.exe"
+                    if exe.is_file():
+                        found.append(exe)
     return _pick_best(found)
 
 
 def _from_app_paths() -> Optional[Path]:
-    script = (
-        "@('HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\TBe.exe',"
-        "'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\TBe.exe',"
-        "'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\TBe.exe') |"
-        " ForEach-Object { (Get-ItemProperty $_ -ErrorAction SilentlyContinue).'(default)' }"
-    )
-    found = [_normalize(line) for line in _run_powershell(script).splitlines()]
-    return _pick_best([p for p in found if p is not None])
+    path = _normalize(winproc.app_path_default("TBe.exe"))
+    return _pick_best([path] if path is not None else [])
 
 
 def _from_common_dirs(log: LogFn = _noop) -> Optional[Path]:
@@ -292,15 +272,8 @@ def find_available_port(preferred: int, count: int = PORT_SCAN_COUNT):
 
 
 def port_owner(port: int) -> str:
-    """查一下端口被谁占着（只用于日志提示）。"""
-    script = (
-        f"$c = Get-NetTCPConnection -LocalPort {port} -State Listen "
-        "-ErrorAction SilentlyContinue | Select-Object -First 1;"
-        "if ($c) { $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue;"
-        " if ($p) { $p.ProcessName + ' (PID ' + $p.Id + ')' } else "
-        "{ 'PID ' + $c.OwningProcess } }"
-    )
-    return _run_powershell(script, timeout=15).strip()
+    """查一下端口被谁占着（只用于日志提示）。纯 Win32，无子进程。"""
+    return winproc.listen_owner_name(port)
 
 
 def is_tbe_debug_port(port: int) -> bool:
@@ -370,12 +343,8 @@ def stop_client(log: LogFn = _noop) -> bool:
     唤到前面然后自己退出，**调试端口根本不会开**。表现就是一直连不上。
     """
     log("正在关闭 TBe+ …")
-    script = (
-        "Get-Process TBe -ErrorAction SilentlyContinue | Stop-Process -Force;"
-        "Start-Sleep -Milliseconds 800"
-    )
     for attempt in range(3):
-        _run_powershell(script, timeout=30)
+        winproc.kill_pids(winproc.pids("TBe.exe"))
         time.sleep(2)
         if not is_client_running():
             log("  客户端已关闭")
@@ -390,10 +359,12 @@ def stop_client(log: LogFn = _noop) -> bool:
 def start_client(exe: Path, port: int, log: LogFn = _noop) -> None:
     log(f"带调试端口启动：{exe}")
     log(f"  --remote-debugging-port={port}")
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
     subprocess.Popen(
         [str(exe), f"--remote-debugging-port={port}"],
         cwd=str(exe.parent),
         close_fds=True,
+        creationflags=flags,
     )
 
 

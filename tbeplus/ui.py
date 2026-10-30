@@ -270,13 +270,19 @@ class App:
             pass
 
     def _build_titlebar(self) -> None:
-        bar = tk.Frame(self.root, bg=C["nav"], height=TITLEBAR_H)
+        # 标题栏左右分色：左段与侧边栏同宽、同深色（放品牌，和侧边栏连成一列，
+        # 品牌只出现一次）；右段浅底，放窗口按钮 —— 对齐设计稿。
+        bar = tk.Frame(self.root, bg=C["bg"], height=TITLEBAR_H)
         bar.pack(fill=X)
         bar.pack_propagate(False)
         self.titlebar = bar
 
-        left = tk.Frame(bar, bg=C["nav"])
-        left.pack(side=LEFT, padx=(14, 0), pady=9)
+        dark = tk.Frame(bar, bg=C["nav"], width=T.SIDEBAR_W)
+        dark.pack(side=LEFT, fill=Y)
+        dark.pack_propagate(False)
+
+        left = tk.Frame(dark, bg=C["nav"])
+        left.pack(side=LEFT, padx=(16, 0), pady=(TITLEBAR_H - 24) // 2)
         logo = tk.Canvas(left, width=24, height=24, bg=C["nav"],
                          highlightthickness=0, bd=0)
         logo.pack(side=LEFT)
@@ -289,17 +295,17 @@ class App:
         tk.Label(left, text="TBE+ 自动化中心", font=T.f(10, True),
                  fg=C["nav_text"], bg=C["nav"]).pack(side=LEFT, padx=(9, 0))
 
-        # 右侧窗口按钮
-        clos = W.IconBtn(bar, "\uE8BB", self._on_close, C["nav"], C["nav_hover"],
-                         danger=True)
-        clos.pack(side=RIGHT)
-        self.btn_max = W.IconBtn(bar, "\uE922", self._toggle_max, C["nav"],
-                                 C["nav_hover"], danger=False)
+        # 右侧窗口按钮（浅底，图标用深色）
+        clos = W.IconBtn(bar, "\uE8BB", self._on_close, C["bg"],
+                         C["surface_hover"], danger=True, fg=C["text2"])
+        clos.pack(side=RIGHT, padx=(0, 9))
+        self.btn_max = W.IconBtn(bar, "\uE922", self._toggle_max, C["bg"],
+                                 C["surface_hover"], danger=False, fg=C["text2"])
         self.btn_max.pack(side=RIGHT)
-        W.IconBtn(bar, "\uE921", self._minimize, C["nav"], C["nav_hover"],
-                  danger=False).pack(side=RIGHT)
+        W.IconBtn(bar, "\uE921", self._minimize, C["bg"], C["surface_hover"],
+                  danger=False, fg=C["text2"]).pack(side=RIGHT)
 
-        for widget in (bar, left, logo):
+        for widget in (bar, dark, left, logo):
             widget.bind("<ButtonPress-1>", self._drag_start)
             widget.bind("<B1-Motion>", self._drag_move)
             widget.bind("<Double-Button-1>", lambda _e: self._toggle_max())
@@ -538,22 +544,10 @@ class App:
         self.sidebar = bar
 
         self.nav: dict = {}
-        brand = tk.Frame(bar, bg=C["nav"])
-        brand.pack(fill=X, padx=18, pady=(16, 6))
-        logo = tk.Canvas(brand, width=28, height=28, bg=C["nav"],
-                         highlightthickness=0, bd=0)
-        logo.pack(side=LEFT)
-        W.round_rect(logo, 0, 0, 27, 27, 8, fill=C["nav_sel"],
-                     outline="", width=0)
-        logo.create_text(13.5, 10, text="TBe", font=T.f(6, True),
-                         fill=C["on_dark"])
-        logo.create_text(13.5, 19, text="+", font=T.f(8, True),
-                         fill=C["on_dark"])
-        tk.Label(brand, text="TBE+ 自动化中心", font=T.f(12, True),
-                 fg=C["on_dark"], bg=C["nav"]).pack(side=LEFT, padx=(10, 0))
-
+        # 品牌已在顶部标题栏统一展示，这里不再重复（原先这里会再画一遍
+        # logo + "TBE+ 自动化中心"，导致左上角出现两个图标两个标题）。
         top = tk.Frame(bar, bg=C["nav"])
-        top.pack(fill=X)
+        top.pack(fill=X, pady=(10, 0))
         for group, items in (
             ("运行中心", ((HOME, "任务概览", "\uE80F"), (LOG, "运行日志", "\uE81C"))),
             ("配置管理", ((SETTINGS, "任务设置", "\uE713"),

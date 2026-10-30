@@ -33,19 +33,6 @@ HOME_IMAGE = "TBeHome.exe"
 # ---------------------------------------------------------------------------
 # 基础
 # ---------------------------------------------------------------------------
-def _run_powershell(script: str, timeout: float = 20.0) -> str:
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, creationflags=flags,
-        )
-        return (result.stdout or "").strip()
-    except Exception:  # noqa: BLE001
-        return ""
-
-
 def is_home_running() -> bool:
     return bool(newsapi._pids(HOME_IMAGE))
 
@@ -79,11 +66,14 @@ def _from_configured(candidates: Iterable[str]) -> Optional[Path]:
 
 
 def _from_running() -> Optional[Path]:
-    out = _run_powershell(
-        "(Get-Process TBeHome -ErrorAction SilentlyContinue | "
-        "Select-Object -First 1 -ExpandProperty Path)"
-    )
-    return _valid(Path(out)) if out else None
+    from . import winproc
+    for pid in winproc.pids(HOME_IMAGE):
+        path = winproc.exe_path(pid)
+        if path is not None:
+            found = _valid(path)
+            if found:
+                return found
+    return None
 
 
 def _install_roots() -> List[Path]:
@@ -125,32 +115,29 @@ def _from_common_dirs() -> Optional[Path]:
 
 
 def _from_registry() -> Optional[Path]:
-    script = (
-        "$keys = @('HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
-        "'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
-        "'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*');"
-        "Get-ItemProperty $keys -ErrorAction SilentlyContinue |"
-        " Where-Object { $_.DisplayName -match 'TBeHome|钉钉版' } |"
-        " ForEach-Object { $_.InstallLocation; $_.DisplayIcon }"
-    )
-    for line in _run_powershell(script).splitlines():
-        text = line.strip().strip('"')
-        if not text:
+    from . import winproc
+    for info in winproc.iter_uninstall():
+        blob = " ".join(str(v) for v in info.values())
+        if "tbehome" not in blob.lower() and "钉钉版" not in blob:
             continue
-        path = Path(text.split(",")[0])
-        candidates = [path]
-        if path.is_file():
-            candidates.append(path.parent / "main" / "current" / HOME_IMAGE)
-        for base in list(candidates):
-            if base.is_dir():
-                candidates += [
-                    base / "TBeHome.exe",
-                    base / "main" / "current" / "TBeHome.exe",
-                ]
-        for item in candidates:
-            found = _valid(item)
-            if found:
-                return found
+        for field in ("InstallLocation", "DisplayIcon"):
+            text = str(info.get(field) or "").strip().strip('"')
+            if not text:
+                continue
+            path = Path(text.split(",")[0])
+            candidates = [path]
+            if path.is_file():
+                candidates.append(path.parent / "main" / "current" / HOME_IMAGE)
+            for base in list(candidates):
+                if base.is_dir():
+                    candidates += [
+                        base / "TBeHome.exe",
+                        base / "main" / "current" / "TBeHome.exe",
+                    ]
+            for item in candidates:
+                found = _valid(item)
+                if found:
+                    return found
     return None
 
 
@@ -188,7 +175,9 @@ def launch_home(exe: Path, log: LogFn = _noop) -> bool:
         return True
     log(f"启动钉钉版 e+：{exe}")
     try:
-        subprocess.Popen([str(exe)], cwd=str(exe.parent), close_fds=True)
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+        subprocess.Popen([str(exe)], cwd=str(exe.parent), close_fds=True,
+                         creationflags=flags)
     except OSError as exc:
         log(f"  启动失败：{exc}")
         return False

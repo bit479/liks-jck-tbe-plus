@@ -1563,7 +1563,7 @@ class IconBtn(tk.Canvas):
 
     def __init__(self, master, glyph: str, command, bg: str,
                  hover_bg: str, width: int = 44, height: int = 30,
-                 danger: bool = False, size: int = 8):
+                 danger: bool = False, size: int = 8, fg: str | None = None):
         super().__init__(master, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0, cursor="hand2")
         self._glyph = glyph
@@ -1573,6 +1573,7 @@ class IconBtn(tk.Canvas):
         self._danger = danger
         self._cw, self._ch = width, height
         self._size = size
+        self._fg = fg or C["nav_text"]
         self._hover = False
         self.bind("<Enter>", lambda _e: self._paint(True))
         self.bind("<Leave>", lambda _e: self._paint(False))
@@ -1590,9 +1591,9 @@ class IconBtn(tk.Canvas):
             self.create_rectangle(0, 0, self._cw, self._ch,
                                   fill=C["err"] if self._danger else self._hover_bg,
                                   outline="")
+        color = C["on_dark"] if (hover and self._danger) else self._fg
         self.create_text(self._cw / 2, self._ch / 2, text=self._glyph,
-                         font=T.icon(self._size),
-                         fill=C["on_dark"] if (hover and self._danger) else C["nav_text"])
+                         font=T.icon(self._size), fill=color)
 
 
 # ---------------------------------------------------------------- 版本入口卡
