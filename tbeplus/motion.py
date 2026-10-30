@@ -22,7 +22,7 @@ from typing import Callable, Optional
 HOVER = 150
 PRESS = 100
 CARD = 190
-PAGE = 220
+PAGE = 110
 STATUS = 190
 PROGRESS = 280
 LOG = 150
@@ -204,7 +204,7 @@ def fade_window(root, duration: int = WINDOW) -> None:
             pass
 
 
-def slide_in(widget, distance: int = 8, duration: int = PAGE,
+def slide_in(widget, distance: int = 4, duration: int = PAGE,
              delay: int = 0) -> Handle:
     """用 place 做极轻纵向位移；调用前控件已由 place 管理。"""
     if not is_enabled():

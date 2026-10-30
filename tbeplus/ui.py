@@ -195,6 +195,19 @@ class App:
             "mode_old": tk.PhotoImage(file=str(asset("mode_old.png"))),
             "mode_dingtalk": tk.PhotoImage(file=str(asset("mode_dingtalk.png"))),
         }
+        # 左上角品牌图标：按 DPI 选尺寸，避免 125% / 150% 下被拉伸发虚
+        try:
+            scale = float(root.winfo_fpixels("1i")) / 96.0
+        except Exception:  # noqa: BLE001
+            scale = 1.0
+        want = 24.0 * scale
+        brand_px = 24
+        for candidate in (24, 30, 32, 36, 44, 48):
+            if candidate <= want + 0.01:
+                brand_px = candidate
+        self._brand_px = brand_px
+        self._imgs["brand"] = tk.PhotoImage(
+            file=str(asset(f"brand_{brand_px}.png")))
 
         self._build_titlebar()
         self.body = tk.Frame(root, bg=C["bg"])
@@ -205,6 +218,7 @@ class App:
 
         self._install_grips()
         self._make_taskbar_window()
+        self._apply_window_corners()
         root.bind("<Map>", self._on_map)
         root.bind("<Configure>", self._on_root_configure)
         root.after(80, self._drain)
@@ -212,7 +226,6 @@ class App:
         root.after(300, self._sync_window_size)
         self._refresh_adv()
         self._refresh_status()
-        root.after(60, lambda: motion.fade_window(root))
 
     # ==================================================================
     # 窗口外壳（无边框）
@@ -250,6 +263,23 @@ class App:
         except Exception:  # noqa: BLE001
             pass
 
+    def _apply_window_corners(self) -> None:
+        """Windows 11 上让 DWM 给窗口加系统圆角（平滑、无锯齿）。
+
+        无边框（overrideredirect）窗口不一定吃这个属性，失败就保持直角，
+        不做 SetWindowRgn 区域裁剪（那才是锯齿的常见来源）。
+        """
+        try:
+            import ctypes
+
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            pref = ctypes.c_int(2)          # DWMWCP_ROUND
+            # DWMWA_WINDOW_CORNER_PREFERENCE = 33
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 33, ctypes.byref(pref), ctypes.sizeof(pref))
+        except Exception:  # noqa: BLE001 - Win10 / 接口缺失时静默跳过
+            pass
+
     def _sync_window_size(self) -> None:
         """把 Tk 的尺寸模型对回系统实际客户区（某些 DPI 环境会让两者不一致）。"""
         try:
@@ -281,17 +311,12 @@ class App:
         dark.pack(side=LEFT, fill=Y)
         dark.pack_propagate(False)
 
+        px = getattr(self, "_brand_px", 24)
         left = tk.Frame(dark, bg=C["nav"])
-        left.pack(side=LEFT, padx=(16, 0), pady=(TITLEBAR_H - 24) // 2)
-        logo = tk.Canvas(left, width=24, height=24, bg=C["nav"],
-                         highlightthickness=0, bd=0)
+        left.pack(side=LEFT, padx=(16, 0), pady=max(0, (TITLEBAR_H - px) // 2))
+        logo = tk.Label(left, image=self._imgs["brand"], bg=C["nav"],
+                        bd=0, highlightthickness=0)
         logo.pack(side=LEFT)
-        W.round_rect(logo, 0, 0, 23, 23, 7, fill=C["nav_sel"],
-                     outline="", width=0)
-        logo.create_text(11.5, 8.5, text="TBe", font=T.f(5, True),
-                         fill=C["on_dark"])
-        logo.create_text(11.5, 16.5, text="+", font=T.f(7, True),
-                         fill=C["on_dark"])
         tk.Label(left, text="TBE+ 自动化中心", font=T.f(10, True),
                  fg=C["nav_text"], bg=C["nav"]).pack(side=LEFT, padx=(9, 0))
 
@@ -342,12 +367,28 @@ class App:
         self.root.after(80, self._debounce_compact)
 
     def _minimize(self) -> None:
-        self.root.overrideredirect(False)
-        self.root.iconify()
+        """系统原生最小化（SW_MINIMIZE），不改窗口样式。
+
+        原来这里是 overrideredirect(False) + iconify()、还原时再切回 True。
+        窗口样式反复切换会让客户区重算、整窗重绘，表现出来就是白闪和跳变。
+        """
+        try:
+            import ctypes
+
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            ctypes.windll.user32.ShowWindow(hwnd, 6)     # SW_MINIMIZE
+        except Exception:  # noqa: BLE001
+            try:
+                self.root.iconify()
+            except Exception:
+                pass
 
     def _on_map(self, _event=None) -> None:
-        if self.root.state() == "normal" and not self.root.overrideredirect():
-            self.root.after(30, lambda: self.root.overrideredirect(True))
+        # 不再在 map / 还原时切换 overrideredirect，也不调 SetWindowPos(FRAMECHANGED)，
+        # 那些都会让窗口重算、重绘，表现出来就是白闪和跳动。只做轻量布局校正。
+        if self.root.state() != "normal":
+            return
+        self.root.after(60, self._place_grips)
 
     def _install_grips(self) -> None:
         """无边框窗口的边缘拖拽热区。
@@ -662,13 +703,16 @@ class App:
 
     def _show_page(self, key: str, animate: bool = True) -> None:
         self.page = key
+        target = self.pages.get(key)
+        # 先让目标页就位并置顶，再隐藏其它页：避免切换瞬间没有页面覆盖而露出底色。
+        if target is not None:
+            target.place(x=0, y=0, relwidth=1, relheight=1)
+            target.lift()
         for name, frame in self.pages.items():
-            if name == key:
-                frame.place(x=0, y=0, relwidth=1, relheight=1)
-                if animate:
-                    motion.slide_in(frame)
-            else:
+            if name != key:
                 frame.place_forget()
+        if target is not None and animate:
+            motion.slide_in(target)
         for name, item in self.nav.items():
             item.set_active(name == key)
         self.title_var.set(PAGE_TITLES[key])

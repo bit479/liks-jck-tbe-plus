@@ -53,10 +53,15 @@ def measure(spec: tuple, text: str) -> int:
 
 # ---------------------------------------------------------------- 形状
 def round_rect(canvas: tk.Canvas, x1, y1, x2, y2, r, **kw):
-    """在画布上画圆角矩形（用多边形逼近圆弧，肉眼看不出折线）。"""
+    """在画布上画圆角矩形。
+
+    Tk Canvas 没有抗锯齿，能做的就是把圆弧切得足够细：每角 18 段（原来 6 段）
+    后，等腰折线的台阶在 1x / 1.25x / 1.5x 下基本看不出来。真正的 AA 需要
+    位图或系统级圆角，见 README 的说明。
+    """
     r = max(0.0, min(float(r), (x2 - x1) / 2, (y2 - y1) / 2))
     pts: list[float] = []
-    steps = 6
+    steps = 18
     for cx, cy, start in (
         (x2 - r, y1 + r, -90),
         (x2 - r, y2 - r, 0),
