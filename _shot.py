@@ -86,12 +86,15 @@ def main() -> None:
     from tkinter import Tk
 
     from tbeplus.config import load_config
-    from tbeplus.ui import App, CONNECT, HOME, LOG, SETTINGS
+    from tbeplus.ui import (App, CONFIG, CONNECT, HOME, LOG, PREFS, SETTINGS,
+                            VERSION_PAGE)
 
     out = sys.argv[1] if len(sys.argv) > 1 else "shot_home.png"
     page_name = sys.argv[2] if len(sys.argv) > 2 else "home"
     mode = sys.argv[3] if len(sys.argv) > 3 else "old"
-    pages = {"home": HOME, "log": LOG, "settings": SETTINGS, "connect": CONNECT}
+    pages = {"home": HOME, "log": LOG, "settings": SETTINGS,
+             "connect": CONNECT, "config": CONFIG, "version": VERSION_PAGE,
+             "prefs": PREFS}
 
     try:
         from tbeplus.app_icon import set_app_user_model_id

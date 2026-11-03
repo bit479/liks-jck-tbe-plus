@@ -43,7 +43,7 @@ from .config import APP_DIR, Config, load_config
 from .engine import LikeEngine, parse_user_date, summarize
 from .theme import C
 
-TITLEBAR_H = 42
+TITLEBAR_H = 46
 
 # 逐条日志里的状态文字 → 归类。API 模式打中文，页面模式打英文，两种都要认
 STATUS_KINDS = (
@@ -70,19 +70,28 @@ STATUS_KINDS = (
 HOME = "home"
 LOG = "log"
 SETTINGS = "settings"
+CONFIG = "config"
 CONNECT = "connect"
+VERSION_PAGE = "version"
+PREFS = "prefs"
 
 PAGE_TITLES = {
     HOME: "任务概览",
     LOG: "运行日志",
     SETTINGS: "任务设置",
+    CONFIG: "配置管理",
     CONNECT: "账号与连接",
+    VERSION_PAGE: "版本信息",
+    PREFS: "偏好设置",
 }
 PAGE_CRUMBS = {
-    HOME: "运行中心 / 任务概览",
-    LOG: "运行中心 / 运行日志",
-    SETTINGS: "配置管理 / 任务设置",
-    CONNECT: "配置管理 / 账号与连接",
+    HOME: "工作空间 / 任务概览",
+    LOG: "工作空间 / 运行日志",
+    SETTINGS: "自动化管理 / 任务设置",
+    CONFIG: "自动化管理 / 配置管理",
+    CONNECT: "自动化管理 / 账号与连接",
+    VERSION_PAGE: "系统 / 版本信息",
+    PREFS: "系统 / 偏好设置",
 }
 
 # 两个版本各自管自己的板块，互不影响
@@ -170,6 +179,7 @@ class App:
         self._resize_info = None
         self._portal_master = list(config.portal_cards)
         self._home_intro_seen: set = set()
+        self._filter_seen = False
 
         sw, sh = self._work_area()
         w = min(1280, max(820, sw - 40))
@@ -539,16 +549,17 @@ class App:
     def _sync_mode_actions(self) -> None:
         if not getattr(self, "btn_attach", None):
             return
+        compact = bool(getattr(self, "_compact", False))
         if self.mode == "dingtalk":
-            self._btn_attach_idle = "启动钉钉版 e+"
+            self._btn_attach_idle = "启动 e+" if compact else "启动钉钉版 e+"
             self.btn_attach.set_text(self._btn_attach_idle, "\uE8A7")
             self.btn_run.set_text("开始任务", "\uE768")
-            self.btn_dry.set_text("试运行 · 只看不点赞", "\uE9CE")
         else:
-            self._btn_attach_idle = "准备并接管客户端"
+            self._btn_attach_idle = "准备接管" if compact else "准备并接管客户端"
             self.btn_attach.set_text(self._btn_attach_idle, "\uE72C")
             self.btn_run.set_text("开始点赞", "\uE768")
-            self.btn_dry.set_text(self._btn_dry_idle, "\uE9CE")
+        self._btn_dry_idle = "试运行" if compact else "试运行 · 只看不点赞"
+        self.btn_dry.set_text(self._btn_dry_idle, "\uE9CE")
 
     def _intro_home(self) -> None:
         """概览首屏分层出现：统计卡以极短交错淡入，只播一次。"""
@@ -585,28 +596,31 @@ class App:
         self.sidebar = bar
 
         self.nav: dict = {}
-        # 品牌已在顶部标题栏统一展示，这里不再重复（原先这里会再画一遍
-        # logo + "TBE+ 自动化中心"，导致左上角出现两个图标两个标题）。
         top = tk.Frame(bar, bg=C["nav"])
-        top.pack(fill=X, pady=(10, 0))
+        top.pack(fill=X, pady=(12, 0))
         for group, items in (
-            ("运行中心", ((HOME, "任务概览", "\uE80F"), (LOG, "运行日志", "\uE81C"))),
-            ("配置管理", ((SETTINGS, "任务设置", "\uE713"),
-                          (CONNECT, "账号与连接", "\uE77B"))),
+            ("工作空间", ((HOME, "任务概览", "\uE80F"),
+                          (LOG, "运行日志", "\uE81C"))),
+            ("自动化管理", ((SETTINGS, "任务设置", "\uE713"),
+                            (CONFIG, "配置管理", "\uE8B7"),
+                            (CONNECT, "账号与连接", "\uE77B"))),
+            ("系统", ((VERSION_PAGE, "版本信息", "\uE946"),
+                      (PREFS, "偏好设置", "\uE9CE"))),
         ):
             tk.Label(top, text=group, font=T.f(8), fg=C["nav_group"], bg=C["nav"],
-                     anchor="w").pack(fill=X, padx=22, pady=(10, 4))
+                     anchor="w").pack(fill=X, padx=20, pady=(12, 4))
             box = tk.Frame(top, bg=C["nav"])
-            box.pack(fill=X, padx=14)
+            box.pack(fill=X, padx=12)
             for key, text, glyph in items:
                 item = W.NavItem(box, text, glyph,
                                  command=lambda k=key: self._show_page(k),
-                                 active=(key == HOME))
+                                 active=(key == HOME),
+                                 width=T.SIDEBAR_W - 24, height=36)
                 item.pack(fill=X, pady=1)
                 self.nav[key] = item
 
         footer = tk.Frame(bar, bg=C["nav"])
-        footer.pack(side="bottom", fill=X, padx=14, pady=14)
+        footer.pack(side="bottom", fill=X, padx=12, pady=12)
 
         card = W.Panel(footer, radius=9, fill=C["nav_active"],
                        stroke=C["nav_line"], bg=C["nav"])
@@ -614,35 +628,39 @@ class App:
         self.status_card = card
         body = card.body
         head = tk.Frame(body, bg=C["nav_active"])
-        head.pack(fill=X, padx=12, pady=(9, 0))
+        head.pack(fill=X, padx=11, pady=(8, 0))
         tk.Label(head, text="客户端状态", font=T.f(8), fg=C["nav_muted"],
                  bg=C["nav_active"], anchor="w").pack(side=LEFT)
         W.Btn(head, "", lambda: self._refresh_status(), variant="ghost",
               icon="\uE72C", width=22, height=19, pad=3, bg=C["nav_active"],
               ).pack(side=RIGHT)
         line = tk.Frame(body, bg=C["nav_active"])
-        line.pack(fill=X, padx=12, pady=(5, 0))
+        line.pack(fill=X, padx=11, pady=(4, 0))
         self.dot = tk.Canvas(line, width=9, height=9, bg=C["nav_active"],
                              highlightthickness=0, bd=0)
         self.dot.pack(side=LEFT)
         self._draw_dot(C["text3"])
         self.status_var = StringVar(value="正在检查…")
-        tk.Label(line, textvariable=self.status_var, font=T.f(10, True),
+        tk.Label(line, textvariable=self.status_var, font=T.f(9, True),
                  fg=C["on_dark"], bg=C["nav_active"], anchor="w").pack(
             side=LEFT, padx=(6, 0))
         self.status_note = StringVar(value="\u00a0\n\u00a0")
         tk.Label(body, textvariable=self.status_note, font=T.f(8),
                  fg=C["nav_muted"], bg=C["nav_active"], anchor="w",
-                 justify="left", wraplength=166).pack(
-            fill=X, padx=12, pady=(4, 2))
-        card.fit(extra=10)
+                 justify="left", wraplength=160).pack(
+            fill=X, padx=11, pady=(3, 2))
+        card.fit(extra=8)
 
+        self.version_var = StringVar(value=f"TBE+ v{VERSION}")
+        tk.Label(footer, textvariable=self.version_var, font=T.f(8),
+                 fg=C["nav_group"], bg=C["nav"], anchor="w").pack(
+            fill=X, pady=(8, 0))
         W.Btn(footer, "切换版本", self._switch_mode, variant="ghost",
-              icon="\uE8AB", width=T.NAV_W, height=30, size=9,
-              bg=C["nav"]).pack(fill=X, pady=(8, 0))
-        W.Btn(footer, "打开程序目录", self._open_output, variant="ghost",
-              icon="\uE8B7", width=T.NAV_W, height=30, size=9,
-              bg=C["nav"]).pack(fill=X, pady=(2, 0))
+              icon="\uE8AB", width=T.SIDEBAR_W - 24, height=26, size=8,
+              pad=8, bg=C["nav"]).pack(fill=X, pady=(4, 0))
+        W.Btn(footer, "打开目录", self._open_output, variant="ghost",
+              icon="\uE8B7", width=T.SIDEBAR_W - 24, height=26, size=8,
+              pad=8, bg=C["nav"]).pack(fill=X, pady=(2, 0))
 
         self.main = tk.Frame(shell, bg=C["bg"])
         self.main.pack(side=LEFT, fill=BOTH, expand=True)
@@ -654,12 +672,11 @@ class App:
         self.dot.create_oval(1, 1, 8, 8, fill=color, outline="")
 
     def _build_header(self) -> None:
-        # 高度按内容定：16pt 标题在 125% 缩放下行高约 42px，留足两行的空间
-        header = tk.Frame(self.main, bg=C["bg"], height=94)
+        header = tk.Frame(self.main, bg=C["bg"], height=T.HEADER_H)
         header.pack(fill=X)
         header.pack_propagate(False)
         inner = tk.Frame(header, bg=C["bg"])
-        inner.pack(fill=BOTH, expand=True, padx=T.GAP_L, pady=(12, 10))
+        inner.pack(fill=BOTH, expand=True, padx=T.GAP_L, pady=(10, 8))
 
         left = tk.Frame(inner, bg=C["bg"])
         left.pack(side=LEFT)
@@ -668,10 +685,10 @@ class App:
                  bg=C["bg"], anchor="w").pack(anchor="w")
         self.title_var = StringVar(value="任务概览")
         self.sub_var = StringVar(value="")
-        tk.Label(left, textvariable=self.title_var, font=T.f(18, True),
-                 fg=C["text"], bg=C["bg"], anchor="w").pack(anchor="w", pady=(2, 0))
+        tk.Label(left, textvariable=self.title_var, font=T.f(17, True),
+                 fg=C["text"], bg=C["bg"], anchor="w").pack(anchor="w", pady=(1, 0))
         tk.Label(left, textvariable=self.sub_var, font=T.f(9), fg=C["text2"],
-                 bg=C["bg"], anchor="w").pack(anchor="w", pady=(3, 0))
+                 bg=C["bg"], anchor="w").pack(anchor="w", pady=(2, 0))
 
         right = tk.Frame(inner, bg=C["bg"])
         right.pack(side=RIGHT)
@@ -682,9 +699,6 @@ class App:
         self.elapsed_var = StringVar(value="")
         tk.Label(right, textvariable=self.elapsed_var, font=(T.MONO, 9),
                  fg=C["text2"], bg=C["bg"]).pack(side=LEFT)
-        tk.Label(right, text="\uE77B", font=T.icon(11), fg=C["text2"],
-                 bg=C["accent_soft"], width=2).pack(side=LEFT, padx=(12, 0),
-                                                    ipady=3)
         W.Btn(right, "", lambda: self._show_page(SETTINGS), variant="ghost",
               icon="\uE713", width=30, height=28, pad=4, bg=C["bg"]).pack(
             side=LEFT, padx=(10, 0))
@@ -696,13 +710,15 @@ class App:
         self.pages: dict = {}
         for key, builder in ((HOME, self._page_home), (LOG, self._page_log),
                              (SETTINGS, self._page_settings),
-                             (CONNECT, self._page_connect)):
+                             (CONFIG, self._page_config),
+                             (CONNECT, self._page_connect),
+                             (VERSION_PAGE, self._page_version),
+                             (PREFS, self._page_prefs)):
             frame = tk.Frame(host, bg=C["bg"])
             self.pages[key] = frame
             builder(frame)
             # 所有页面一次性就位、叠在一起；切换时只 lift()。
-            # 避免每次切页重新 place / 重新布局（首页控件多，重排要 190ms 左右，
-            # 表现出来就是"卡白屏"）。
+            # 避免每次切页重新 place / 重新布局。
             frame.place(x=0, y=0, relwidth=1, relheight=1)
 
     def _show_page(self, key: str, animate: bool = True) -> None:
@@ -717,6 +733,10 @@ class App:
         self.crumb_var.set(PAGE_CRUMBS[key])
         if key == CONNECT:
             self._refresh_connect()
+        elif key == CONFIG:
+            self._refresh_config_page()
+        elif key == VERSION_PAGE:
+            self._refresh_version_page()
         self.root.after(60, self._debounce_compact)
 
     # ==================================================================
@@ -766,24 +786,13 @@ class App:
         self._layout_cards(compact)
         self._layout_actions(compact)
         for label in self._section_labels:
-            label.configure(width=15 if compact else 20)
+            label.configure(width=13 if compact else 18)
         self._layout_board_chips(compact)
-        if getattr(self, "btn_attach", None):
-            if compact:
-                if self.btn_attach.winfo_manager():
-                    self.btn_attach.pack_forget()
-            elif not self.btn_attach.winfo_manager():
-                self.btn_attach.pack(side=LEFT)   # 追加到按钮组最右
         if getattr(self, "log_subtitle", None):
             if compact:
                 self.log_subtitle.pack_forget()
-                self.home_quick.pack_forget()
-            else:
-                if not self.log_subtitle.winfo_manager():
-                    self.log_subtitle.pack(side=LEFT, padx=10)
-                if not self.home_quick.winfo_manager():
-                    self.home_quick.pack(side=RIGHT, padx=(0, 8),
-                                         before=self.pause_chip)
+            elif not self.log_subtitle.winfo_manager():
+                self.log_subtitle.pack(side=LEFT, padx=10)
 
     def _layout_cards(self, compact: bool) -> None:
         # 仪表盘固定四列：窄窗口下变成 2x2 会把下面日志挤没，
@@ -824,77 +833,96 @@ class App:
     def _page_home(self, f: tk.Frame) -> None:
         f.bind("<Configure>", self._on_page_configure)
 
-        # ---------------- 核心指标 ----------------
+        # ---------------- 统计指标 ----------------
         cards = tk.Frame(f, bg=C["bg"])
         cards.pack(fill=X)
-        self.card_processed = W.StatCard(cards, "已处理", C["slate"], "\uE73E")
-        self.card_liked = W.StatCard(cards, "新点赞", C["accent"], "\uEB51")
-        self.card_already = W.StatCard(cards, "原本已赞", C["ok"], "\uEB52")
-        self.card_failed = W.StatCard(cards, "未成功", C["err"], "\uE7BA")
+        self.card_processed = W.StatCard(cards, "已处理资讯", C["slate"])
+        self.card_liked = W.StatCard(cards, "新增点赞", C["accent"])
+        self.card_already = W.StatCard(cards, "原本已赞", C["ok"])
+        self.card_failed = W.StatCard(cards, "执行失败", C["err"])
         self._cards = [self.card_processed, self.card_liked,
                        self.card_already, self.card_failed]
         self._cards_host = cards
         self._layout_cards(False)
 
-        # ---------------- 执行任务 ----------------
+        # ---------------- 任务执行 ----------------
         panel = W.Panel(f)
-        panel.pack(fill=X, pady=(10, 0))
+        panel.pack(fill=X, pady=(T.GAP_M, 0))
         panel.pack_propagate(False)
         self.exec_panel = panel
         body = panel.body
-        head = self._card_head(body, "执行任务", pad=(20, 8))
-        self.stage_var = StringVar(value="就绪")
+        head = self._card_head(body, "任务执行", pad=(18, 10))
+        self.stage_var = StringVar(value="")
         tk.Label(head, textvariable=self.stage_var, font=T.f(9), fg=C["text3"],
                  bg=C["surface"]).pack(side=RIGHT)
 
-        row = tk.Frame(body, bg=C["surface"])
-        row.pack(fill=X, padx=20, pady=(4, 0))
-        left = tk.Frame(row, bg=C["surface"])
-        left.pack(side=LEFT, fill=X, expand=True)
-        line = tk.Frame(left, bg=C["surface"])
-        line.pack(fill=X)
-        self.run_state = tk.Label(line, text="● 就绪", font=T.f(9),
+        # 状态 + 计数
+        mrow = tk.Frame(body, bg=C["surface"])
+        mrow.pack(fill=X, padx=18, pady=(2, 0))
+        self.run_state = tk.Label(mrow, text="● 就绪", font=T.f(9),
                                   fg=C["text3"], bg=C["surface"], anchor="w")
         self.run_state.pack(side=LEFT)
-        self.prog_note = StringVar(value="等待开始")
-        tk.Label(line, textvariable=self.prog_note, font=T.f(9), fg=C["text3"],
-                 bg=C["surface"]).pack(side=RIGHT, padx=(10, 0))
-        self.home_bar = W.Bar(line, height=8)
-        self.home_bar.pack(side=LEFT, fill=X, expand=True, padx=(14, 0))
-        self.prog_var = StringVar(value="0 / 0 篇")
-        tk.Label(left, textvariable=self.prog_var, font=T.f(16, True),
-                 fg=C["text"], bg=C["surface"], anchor="w").pack(
-            anchor="w", pady=(6, 0))
 
-        right = tk.Frame(row, bg=C["surface"])
-        right.pack(side=RIGHT, padx=(16, 0))
+        def _metric(label: str, var: StringVar, color: str | None = None) -> None:
+            cell = tk.Frame(mrow, bg=C["surface"])
+            cell.pack(side=LEFT, padx=(20, 0))
+            tk.Label(cell, text=label, font=T.f(8), fg=C["text3"],
+                     bg=C["surface"]).pack(anchor="w")
+            tk.Label(cell, textvariable=var, font=T.f(12, True, T.MONO),
+                     fg=color or C["text"], bg=C["surface"]).pack(anchor="w")
+
+        self.prog_var = StringVar(value="0 / 0")
+        self.pending_var = StringVar(value="0")
+        self.ok_var = StringVar(value="0")
+        self.fail_var = StringVar(value="0")
+        self.run_time_var = StringVar(value="00:00")
+        _metric("已处理 / 总数", self.prog_var)
+        _metric("待处理", self.pending_var)
+        _metric("成功", self.ok_var, C["ok"])
+        _metric("失败", self.fail_var, C["err"])
+        _metric("用时", self.run_time_var)
+
+        # 进度条
+        prow = tk.Frame(body, bg=C["surface"])
+        prow.pack(fill=X, padx=18, pady=(10, 0))
+        self.home_bar = W.Bar(prow, height=6, track=C["surface_hi"])
+        self.home_bar.pack(side=LEFT, fill=X, expand=True)
+        self.prog_note = StringVar(value="等待开始")
+        tk.Label(prow, textvariable=self.prog_note, font=T.f(8),
+                 fg=C["text3"], bg=C["surface"]).pack(side=RIGHT, padx=(10, 0))
+
+        # 操作按钮
+        brow = tk.Frame(body, bg=C["surface"])
+        brow.pack(fill=X, padx=18, pady=(12, 0))
         self._btn_attach_idle = "准备并接管客户端"
         self._btn_dry_idle = "试运行 · 只看不点赞"
-        self.btn_run = W.Btn(right, "开始点赞", self._on_run, variant="primary",
-                             icon="\uE768", bold=True, width=128, height=34,
+        self.btn_run = W.Btn(brow, "开始点赞", self._on_run, variant="primary",
+                             icon="\uE768", bold=True, width=124, height=32,
                              size=9)
         self.btn_run.pack(side=LEFT)
-        self.btn_dry = W.Btn(right, self._btn_dry_idle, self._on_dry_run,
-                             variant="outline", icon="\uE9CE", height=34,
+        self.btn_dry = W.Btn(brow, self._btn_dry_idle, self._on_dry_run,
+                             variant="outline", icon="\uE9CE", height=32,
                              size=9)
         self.btn_dry.pack(side=LEFT, padx=(8, 0))
-        self.btn_stop = W.Btn(right, "停止", self._on_stop, variant="danger",
-                              icon="\uE71A", width=64, height=34, size=9)
+        self.btn_stop = W.Btn(brow, "停止", self._on_stop, variant="danger",
+                              icon="\uE71A", width=64, height=32, size=9)
         self.btn_stop.pack(side=LEFT, padx=(8, 0))
         self.btn_stop.set_enabled(False)
-        self.btn_attach = W.Btn(right, self._btn_attach_idle, self._on_prepare,
-                                variant="secondary", icon="\uE72C", height=34,
+        self.btn_attach = W.Btn(brow, self._btn_attach_idle, self._on_prepare,
+                                variant="secondary", icon="\uE72C", height=32,
                                 size=9)
         self.btn_attach.pack(side=LEFT, padx=(8, 0))
 
-        self.steps = W.Steps(body, ("连接客户端", "读取资讯", "执行点赞"))
-        self.steps.pack(fill=X, padx=20, pady=(4, 0))
+        # 五阶段
+        self.steps = W.Steps(body, ("客户端连接", "获取资讯", "资讯筛选",
+                                    "执行点赞", "结果统计"))
+        self.steps.pack(fill=X, padx=18, pady=(12, 0))
 
         self.sections_strip = tk.Frame(body, bg=C["surface"])
-        self.sections_strip.pack(fill=X, padx=20, pady=(0, 0))
+        self.sections_strip.pack(fill=X, padx=18, pady=(2, 0))
 
         cur = tk.Frame(body, bg=C["surface"])
-        cur.pack(fill=X, padx=20, pady=(2, 6))
+        cur.pack(fill=X, padx=18, pady=(6, 8))
         tk.Label(cur, text="\uE7C3", font=T.icon(8), fg=C["text3"],
                  bg=C["surface"]).pack(side=LEFT)
         self.current_var = StringVar(value="还没有开始，点「开始点赞」或先「试运行」。")
@@ -904,112 +932,56 @@ class App:
         self.current_time = StringVar(value="")
         tk.Label(cur, textvariable=self.current_time, font=(T.MONO, 8),
                  fg=C["text3"], bg=C["surface"]).pack(side=RIGHT)
-        panel.fit(extra=4)
-
-        # ---------------- 处理进度 + 运行质量 ----------------
-        mid = tk.Frame(f, bg=C["bg"], height=148)
-        mid.pack(fill=X, pady=(10, 0))
-        mid.pack_propagate(False)
-        self.mid_row = mid
-
-        p1 = W.Panel(mid)
-        p1.pack(side=LEFT, fill=BOTH, expand=True)
-        b1 = p1.body
-        self._card_head(b1, "处理进度", "按已处理文章的实际结果分布", pad=(18, 12))
-        self.seg = W.SegBar(b1, height=14)
-        self.seg.pack(fill=X, padx=18, pady=(10, 0))
-        legend = tk.Frame(b1, bg=C["surface"])
-        legend.pack(fill=X, padx=18, pady=(12, 0))
-        self.legend_vars = {}
-        for key, label, color in (
-            ("liked", "已点赞", C["ok"]),
-            ("already", "原本已赞", C["slate"]),
-            ("pending", "待处理", C["stroke_hi"]),
-            ("failed", "失败", C["err"]),
-        ):
-            cell = tk.Frame(legend, bg=C["surface"])
-            cell.pack(side=LEFT, expand=True, fill=X)
-            dot = tk.Canvas(cell, width=8, height=8, bg=C["surface"],
-                            highlightthickness=0, bd=0)
-            dot.create_oval(1, 1, 7, 7, fill=color, outline="")
-            dot.pack(side=LEFT)
-            var = StringVar(value="0")
-            tk.Label(cell, text=label, font=T.f(8), fg=C["text3"],
-                     bg=C["surface"]).pack(side=LEFT, padx=(6, 0))
-            tk.Label(cell, textvariable=var, font=T.f(11, True), fg=C["text"],
-                     bg=C["surface"]).pack(side=LEFT, padx=(6, 0))
-            self.legend_vars[key] = var
-        p1.fit(extra=6)
-
-        p2 = W.Panel(mid, width=318)
-        p2.pack(side=RIGHT, fill=Y, padx=(10, 0))
-        p2.pack_propagate(False)
-        b2 = p2.body
-        self._card_head(b2, "运行质量", "取真实运行结果", pad=(18, 12))
-        qrow = tk.Frame(b2, bg=C["surface"])
-        qrow.pack(fill=BOTH, expand=True, padx=18, pady=(10, 6))
-        self.quality_vars = {}
-        for i, (key, label, glyph) in enumerate((
-            ("rate", "成功率", "\uE73E"),
-            ("speed", "平均耗时", "\uE916"),
-            ("batch", "当前批次", "\uE8EF"),
-        )):
-            if i:
-                tk.Frame(qrow, bg=C["stroke"], width=1).pack(
-                    side=LEFT, fill=Y, padx=8)
-            col = tk.Frame(qrow, bg=C["surface"])
-            col.pack(side=LEFT, expand=True, fill=X)
-            tk.Label(col, text=glyph, font=T.icon(9), fg=C["accent"],
-                     bg=C["surface"], anchor="w").pack(anchor="w")
-            var = StringVar(value="—")
-            tk.Label(col, textvariable=var, font=T.f(14, True), fg=C["text"],
-                     bg=C["surface"], anchor="w").pack(anchor="w", pady=(4, 0))
-            tk.Label(col, text=label, font=T.f(8), fg=C["text3"],
-                     bg=C["surface"], anchor="w").pack(anchor="w")
-            self.quality_vars[key] = var
+        panel.fit(extra=6)
 
         # ---------------- 实时日志 ----------------
         logp = W.Panel(f)
-        logp.pack(fill=BOTH, expand=True, pady=(10, 0))
+        logp.pack(fill=BOTH, expand=True, pady=(T.GAP_M, 0))
         self.log_panel = logp
         lb = logp.body
         lhead = self._card_head(lb, "实时日志", pad=(18, 10))
-        self.log_subtitle = tk.Label(lhead, text="连接、读取、点赞全过程",
-                                     font=T.f(9), fg=C["text3"], bg=C["surface"])
+        self.log_subtitle = tk.Label(lhead, text="时间 · 级别 · 来源 · 内容",
+                                     font=T.f(8), fg=C["text3"], bg=C["surface"])
         self.log_subtitle.pack(side=LEFT, padx=10)
-        W.Btn(lhead, "查看全部日志", lambda: self._show_page(LOG),
-              variant="link", icon="\uE76C", height=26, size=9,
+        W.Btn(lhead, "查看全部", lambda: self._show_page(LOG),
+              variant="link", icon="\uE76C", height=24, size=8,
               pad=6, bg=C["surface"]).pack(side=RIGHT)
         self.pause_chip = W.Switch(lhead, False, command=self._on_pause_toggle,
                                    bg=C["surface"])
         self.pause_chip.pack(side=RIGHT, padx=(0, 10))
-        tk.Label(lhead, text="暂停滚动", font=T.f(9), fg=C["text2"],
+        tk.Label(lhead, text="自动滚动", font=T.f(8), fg=C["text2"],
                  bg=C["surface"]).pack(side=RIGHT, padx=(0, 6))
         self.log_search_var = StringVar(value="")
-        search = W.entry(lhead, self.log_search_var, width=18, size=9)
-        search.pack(side=RIGHT, padx=(0, 6), ipady=3)
-        self._log_search_ph(search, "搜索资讯标题或内容…")
+        search = W.entry(lhead, self.log_search_var, width=16, size=8)
+        search.pack(side=RIGHT, padx=(0, 6), ipady=2)
+        self._log_search_ph(search, "搜索关键词…")
         search.bind("<KeyRelease>", lambda _e: self._on_log_search())
-        tk.Label(lhead, text="\uE721", font=T.icon(8), fg=C["text3"],
-                 bg=C["surface"]).pack(side=RIGHT, padx=(0, 4))
-        self.home_quick = RadioChips(
-            lhead, (("all", "全部"), ("key", "关键"), ("issue", "问题")),
-            command=self._on_home_filter, solid=True)
-        self.home_quick.pack(side=RIGHT, padx=(0, 8))
-        self.home_quick.choose("all", notify=False)
 
-        # 列头与 Text 的制表位对齐
-        colhead = tk.Canvas(lb, bg=C["term"], height=20,
+        # 过滤行：五档 + 清空 / 复制 / 导出
+        frow = tk.Frame(lb, bg=C["surface"])
+        frow.pack(fill=X, padx=18, pady=(2, 4))
+        self.home_quick = RadioChips(
+            frow, (("all", "全部"), ("success", "成功"), ("key", "关键"),
+                   ("warn", "警告"), ("error", "错误")),
+            command=self._on_home_filter, solid=True)
+        self.home_quick.pack(side=LEFT)
+        self.home_quick.choose("all", notify=False)
+        for text, cmd in (("清空", self._clear_log), ("复制", self._copy_log),
+                          ("导出", self._export_log)):
+            W.Btn(frow, text, cmd, variant="ghost", height=24, size=8,
+                  pad=6, bg=C["surface"]).pack(side=RIGHT, padx=(6, 0))
+
+        # 列头与 Text 制表位对齐
+        colhead = tk.Canvas(lb, bg=C["term"], height=18,
                             highlightthickness=0, bd=0)
-        colhead.pack(fill=X, padx=(0, 10), pady=(4, 0))
-        for text, x in (("时间", 0), ("级别", 64), ("进度", 118),
-                        ("状态", 176), ("资讯标题", 276)):
-            colhead.create_text(x, 10, text=text, font=T.f(8),
+        colhead.pack(fill=X, padx=(6, 8), pady=(2, 0))
+        for text, x in zip(W.EventList.HEADERS, (0,) + W.EventList.TABS):
+            colhead.create_text(x, 9, text=text, font=T.f(8),
                                 fill=C["text3"], anchor="w")
 
-        self.home_log = W.LogTable(lb, empty_title="还没有日志",
-                                   empty_hint="点「开始点赞」或「试运行」，这里会显示每篇资讯")
-        self.home_log.pack(fill=BOTH, expand=True, padx=(0, 6), pady=(0, 6))
+        self.home_log = W.EventList(lb, empty_title="还没有日志",
+                                    empty_hint="点「开始点赞」或「试运行」，这里会显示每个事件")
+        self.home_log.pack(fill=BOTH, expand=True, padx=(6, 4), pady=(0, 6))
 
         self.footer_var = StringVar(value="")
         tk.Label(f, textvariable=self.footer_var, font=T.f(8), fg=C["text3"],
@@ -1043,7 +1015,7 @@ class App:
 
     def _on_log_search(self) -> None:
         q = self.log_search_var.get()
-        self.home_log.set_search("" if q == "搜索资讯标题或内容…" else q)
+        self.home_log.set_search("" if q == "搜索关键词…" else q)
 
     def _on_pause_toggle(self) -> None:
         on = self.pause_chip.get()
@@ -1063,25 +1035,35 @@ class App:
         panel.pack(fill=BOTH, expand=True)
         body = panel.body
 
-        head = self._card_head(body, "运行日志", pad=(20, 14))
-        W.Btn(head, "清空", self._clear_log, variant="ghost", width=62,
-              height=28, size=9, bg=C["surface"]).pack(side=RIGHT)
+        head = self._card_head(body, "运行日志", pad=(18, 12))
+        W.Btn(head, "清空", self._clear_log, variant="ghost", width=58,
+              height=26, size=8, bg=C["surface"]).pack(side=RIGHT)
         W.Btn(head, "复制", self._copy_log, variant="secondary",
-              icon="\uE8C8", width=76, height=28, size=9).pack(
+              icon="\uE8C8", width=70, height=26, size=8).pack(
             side=RIGHT, padx=(0, 8))
         W.Btn(head, "导出", self._export_log, variant="secondary", icon="\uE896",
-              width=80, height=28, size=9).pack(side=RIGHT, padx=(0, 8))
+              width=74, height=26, size=8).pack(side=RIGHT, padx=(0, 8))
+
+        frow = tk.Frame(body, bg=C["surface"])
+        frow.pack(fill=X, padx=18, pady=(2, 4))
         self.log_quick = RadioChips(
-            head, (("all", "全部"), ("key", "只看关键"), ("issue", "只看问题")),
+            frow, (("all", "全部"), ("success", "成功"), ("key", "关键"),
+                   ("warn", "警告"), ("error", "错误")),
             command=self._on_log_filter, solid=True)
-        self.log_quick.pack(side=RIGHT, padx=(0, 14))
+        self.log_quick.pack(side=LEFT)
         self.log_quick.choose("all", notify=False)
 
-        W.divider(body).pack(fill=X, padx=20, pady=(10, 0))
-        self.full_log = W.LogView(
+        colhead = tk.Canvas(body, bg=C["term"], height=18,
+                            highlightthickness=0, bd=0)
+        colhead.pack(fill=X, padx=(10, 14), pady=(2, 0))
+        for text, x in zip(W.EventList.HEADERS, (0,) + W.EventList.TABS):
+            colhead.create_text(x, 9, text=text, font=T.f(8),
+                                fill=C["text3"], anchor="w")
+
+        self.full_log = W.EventList(
             body, empty_title="还没有日志",
             empty_hint="回到概览页点「开始点赞」，这里会记录全过程")
-        self.full_log.pack(fill=BOTH, expand=True, padx=10, pady=8)
+        self.full_log.pack(fill=BOTH, expand=True, padx=8, pady=(0, 8))
 
     def _on_log_filter(self, key: str) -> None:
         self.full_log.set_mode(key)
@@ -1112,6 +1094,110 @@ class App:
             messagebox.showwarning("导出失败", str(exc), parent=self.root)
 
     # ==================================================================
+    # 页：配置管理 / 版本信息 / 偏好设置
+    # ==================================================================
+    def _page_config(self, f: tk.Frame) -> None:
+        area = W.ScrollArea(f)
+        area.pack(fill=BOTH, expand=True)
+        holder = area.inner
+
+        p = W.Panel(holder)
+        p.pack(fill=X)
+        self.config_panel = p
+        b = p.body
+        head = self._card_head(b, "运行配置", "来自 config.json（只读）", pad=(18, 12))
+        W.Btn(head, "重新读取配置", self._reload_config, variant="secondary",
+              icon="\uE72C", height=26, size=8).pack(side=RIGHT)
+        self.config_var = StringVar(value="")
+        tk.Label(b, textvariable=self.config_var, font=(T.MONO, 9),
+                 fg=C["text2"], bg=C["surface"], justify="left", anchor="w",
+                 wraplength=760).pack(fill=X, padx=18, pady=(4, 12))
+        p.fit(extra=10)
+
+        p2 = W.Panel(holder)
+        p2.pack(fill=X, pady=(T.GAP_M, 0))
+        b2 = p2.body
+        self._card_head(b2, "程序目录", "配置、状态与日志产物位置", pad=(18, 12))
+        tk.Label(b2, text=str(APP_DIR), font=(T.MONO, 9), fg=C["text2"],
+                 bg=C["surface"], anchor="w", justify="left",
+                 wraplength=760).pack(fill=X, padx=18, pady=(4, 8))
+        W.Btn(b2, "打开目录", self._open_output, variant="ghost",
+              icon="\uE8B7", height=28, size=8).pack(anchor="w", padx=18,
+                                                     pady=(0, 12))
+        p2.fit(extra=10)
+        self.root.after(200, area.refresh)
+
+    def _refresh_config_page(self) -> None:
+        if not hasattr(self, "config_var"):
+            return
+        token = ((self.cfg.news_token or "").strip()
+                 or newsapi.remembered_token(APP_DIR / "state.json"))
+        if len(token) > 12:
+            token_text = f"{token[:6]}…{token[-4:]}"
+        else:
+            token_text = "未设置" if not token else "已设置"
+        self.config_var.set(
+            f"调试端口      {self.cfg.debug_port}\n"
+            f"接口限速      {self.cfg.api_rate}/秒\n"
+            f"并发          {self.cfg.api_concurrency}\n"
+            f"每批篇数      {self.cfg.api_batch_size}\n"
+            f"重启间隔      {self.cfg.restart_every_n_articles} 篇\n"
+            f"新闻站 token  {token_text}\n"
+            f"纯 HTTP 模式  {'开' if self.cfg.http_mode else '关'}"
+        )
+        if hasattr(self, "config_panel"):
+            self.config_panel.fit(extra=10)
+
+    def _page_version(self, f: tk.Frame) -> None:
+        p = W.Panel(f)
+        p.pack(fill=X)
+        self.version_panel = p
+        b = p.body
+        head = self._card_head(b, "版本信息", pad=(18, 12))
+        W.Btn(head, "切换版本", self._switch_mode, variant="secondary",
+              icon="\uE8AB", height=26, size=8).pack(side=RIGHT)
+        self.version_info_var = StringVar(value="")
+        tk.Label(b, textvariable=self.version_info_var, font=T.f(10),
+                 fg=C["text2"], bg=C["surface"], justify="left",
+                 anchor="w").pack(fill=X, padx=18, pady=(4, 12))
+        p.fit(extra=10)
+
+    def _refresh_version_page(self) -> None:
+        if not hasattr(self, "version_info_var"):
+            return
+        mode = MODES.get(self.mode or "", {})
+        self.version_info_var.set(
+            f"应用版本      TBE+ 自动化中心 v{VERSION}\n"
+            f"当前版本      {mode.get('title', '未选择')}\n"
+            f"板块          {'、'.join(self._mode_boards()) or '—'}\n"
+            f"执行方式      {'纯 HTTP' if self.mode == 'dingtalk' else '客户端会话'}"
+        )
+        if hasattr(self, "version_panel"):
+            self.version_panel.fit(extra=10)
+
+    def _page_prefs(self, f: tk.Frame) -> None:
+        p = W.Panel(f)
+        p.pack(fill=X)
+        b = p.body
+        self._card_head(b, "偏好设置", "仅影响本机界面", pad=(18, 12))
+        row = tk.Frame(b, bg=C["surface"])
+        row.pack(fill=X, padx=18, pady=(4, 8))
+        self.motion_switch = W.Switch(row, motion.is_enabled(),
+                                      command=self._on_motion_toggle,
+                                      bg=C["surface"])
+        self.motion_switch.pack(side=LEFT)
+        tk.Label(row, text="减少动态效果", font=T.f(10), fg=C["text"],
+                 bg=C["surface"]).pack(side=LEFT, padx=(10, 0))
+        tk.Label(b, text="关闭悬停、切换和日志淡入等过渡，功能与任务时序不受影响。",
+                 font=T.f(9), fg=C["text3"], bg=C["surface"],
+                 anchor="w").pack(fill=X, padx=18, pady=(0, 12))
+        p.fit(extra=10)
+
+    def _on_motion_toggle(self) -> None:
+        motion.set_enabled(bool(self.motion_switch.get()))
+        self.log("已切换动态效果：" + ("开启" if motion.is_enabled() else "关闭"))
+
+    # ==================================================================
     # 页：设置
     # ==================================================================
     def _page_settings(self, f: tk.Frame) -> None:
@@ -1123,20 +1209,20 @@ class App:
         self.settings_area = area
 
         # ---- 版本 ----
-        p_ver = W.Panel(holder, fill=C["accent_soft"], stroke=C["accent_line"])
+        p_ver = W.Panel(holder, fill=C["surface"], stroke=C["accent_line"])
         p_ver.pack(fill=X)
         self._setting_cards.append(p_ver)
         b = p_ver.body
-        head = self._card_head(b, "版本", bg=C["accent_soft"], pad=(20, 12))
+        head = self._card_head(b, "版本", bg=C["surface"], pad=(20, 12))
         self.mode_label = StringVar(value="")
         tk.Label(head, textvariable=self.mode_label, font=T.f(9),
-                 fg=C["accent_hi"], bg=C["accent_soft"]).pack(side=LEFT, padx=10)
+                 fg=C["accent_hi"], bg=C["surface"]).pack(side=LEFT, padx=10)
         W.Btn(head, "切换版本", self._switch_mode, variant="secondary",
               icon="\uE8AB", width=104, height=26, size=9).pack(side=RIGHT)
         self.ver_var = StringVar(value=f"TBE+ 自动化中心  v{VERSION}")
         tk.Label(b, textvariable=self.ver_var, font=(T.MONO, 9), fg=C["text2"],
-                 bg=C["accent_soft"], anchor="w").pack(fill=X, padx=20,
-                                                       pady=(4, 12))
+                 bg=C["surface"], anchor="w").pack(fill=X, padx=20,
+                                                   pady=(4, 12))
         p_ver.fit(extra=10)
 
         # ---- 新闻时间段 ----
@@ -1910,17 +1996,36 @@ class App:
             self.prog_var.set(f"0 / 0 篇")
             self.prog_note.set("等待开始" if not self.running else "正在统计")
 
-        self.card_processed.set(done, f"{int(frac * 100)}%" if total else "等待运行",
-                                total=total or 0)
-        self.card_liked.set(agg["liked"], f"待点赞 {agg['dry']}" if agg["dry"] else "",
-                            accent=C["accent"])
-        self.card_already.set(agg["already"], "已赞过，自动跳过", accent=C["ok"])
-        self.card_failed.set(agg["failed"], "可重跑补齐" if agg["failed"] else "",
-                             accent=C["err"] if agg["failed"] else C["text3"])
-
-        # 处理进度分布
         pending = max(total - done, 0)
-        if hasattr(self, "seg"):
+        ok_count = agg["liked"] + agg["already"]
+
+        self.card_processed.set(
+            done,
+            f"共 {total} 篇" if total else "尚未开始",
+            total=total or 0,
+        )
+        self.card_liked.set(
+            agg["liked"],
+            f"待处理 {agg['dry']}" if agg["dry"] else "",
+            accent=C["accent"],
+        )
+        self.card_already.set(
+            agg["already"],
+            "已赞过，自动跳过" if agg["already"] else "",
+            accent=C["ok"],
+        )
+        self.card_failed.set(
+            agg["failed"],
+            "可重跑补齐" if agg["failed"] else "",
+            accent=C["err"],
+        )
+        if hasattr(self, "pending_var"):
+            self.pending_var.set(str(pending))
+            self.ok_var.set(str(ok_count))
+            self.fail_var.set(str(agg["failed"]))
+
+        # 旧版「处理进度 / 运行质量」中段卡片已移除，保留兼容分支
+        if hasattr(self, "seg") and hasattr(self, "legend_vars"):
             self.seg.set([agg["liked"], agg["already"], pending, agg["failed"]],
                          [C["ok"], C["slate"], C["stroke_hi"], C["err"]])
             for key, value in (("liked", agg["liked"]),
@@ -1928,39 +2033,50 @@ class App:
                                ("pending", pending),
                                ("failed", agg["failed"])):
                 self.legend_vars[key].set(str(value))
-
-        # 运行质量：只用真实数据，没有数据就显示 —
         elapsed = (time.monotonic() - self.started_at) if self.running else \
             getattr(self, "last_elapsed", 0.0)
-        if done:
-            rate = (agg["liked"] + agg["already"]) * 100.0 / done
-            self.quality_vars["rate"].set(f"{rate:.0f}%")
-            self.quality_vars["speed"].set(f"{elapsed / done:.1f}s")
-        else:
-            self.quality_vars["rate"].set("—")
-            self.quality_vars["speed"].set("—")
-        self.quality_vars["batch"].set(f"{done}/{total}" if total else "—")
+        if hasattr(self, "quality_vars"):
+            if done:
+                rate = (agg["liked"] + agg["already"]) * 100.0 / done
+                self.quality_vars["rate"].set(f"{rate:.0f}%")
+                self.quality_vars["speed"].set(f"{elapsed / done:.1f}s")
+            else:
+                self.quality_vars["rate"].set("—")
+                self.quality_vars["speed"].set("—")
+            self.quality_vars["batch"].set(f"{done}/{total}" if total else "—")
 
-        # 流程步骤
+        # 五阶段：连接 → 获取 → 筛选 → 点赞 → 统计
+        port_ready = bool(self._client_port) or self.mode == "dingtalk"
+        filter_done = self._filter_seen or (total > 0 and done > 0)
         if not self.running and getattr(self, "_last_error", ""):
-            if getattr(self, "steps", None):
-                self.steps.set_states(["done", "error", "idle"])
+            states = [
+                "done" if port_ready else "error",
+                "done" if total else "idle",
+                "done" if filter_done else "idle",
+                "done" if done else "idle",
+                "error",
+            ]
             self.run_state.configure(text="● 失败", fg=C["err"])
         elif self.running:
-            connect = "done" if (self._client_port or self.mode == "dingtalk") else "active"
-            read = "done" if total else "active"
-            like = "active" if done else "idle"
-            if getattr(self, "steps", None):
-                self.steps.set_states([connect, read, like])
+            states = [
+                "done" if port_ready else "active",
+                "done" if total else "active",
+                "done" if filter_done else ("active" if total else "idle"),
+                "done" if (total and done >= total) else ("active" if done else "idle"),
+                "idle",
+            ]
             self.run_state.configure(text="● 运行中", fg=C["accent"])
-        elif done:
-            if getattr(self, "steps", None):
-                self.steps.set_states(["done", "done", "done"])
+        elif done and total and done >= total:
+            states = ["done"] * 5
             self.run_state.configure(text="● 已完成", fg=C["ok"])
+        elif done:
+            states = ["done", "done", "done", "active", "idle"]
+            self.run_state.configure(text="● 运行中", fg=C["accent"])
         else:
-            if getattr(self, "steps", None):
-                self.steps.set_states(["idle", "idle", "idle"])
+            states = ["idle"] * 5
             self.run_state.configure(text="● 就绪", fg=C["text3"])
+        if getattr(self, "steps", None):
+            self.steps.set_states(states)
 
         if self.running:
             prefix = f"正在处理 {self.cur_section}" if self.cur_section else "正在准备"
@@ -1978,6 +2094,10 @@ class App:
 
     def _ingest(self, line: str) -> None:
         s = line.strip()
+        if "时间段筛选" in s:
+            self._filter_seen = True
+            self._recalc()
+            return
         m = re.match(r"^板块：(.+)$", s) or re.match(r"^板块（会话）：(.+)$", s)
         if m:
             name = m.group(1).strip()
@@ -2040,6 +2160,8 @@ class App:
         if self.running:
             sec = int(time.monotonic() - self.started_at)
             self.elapsed_var.set(f"用时 {sec // 60:02d}:{sec % 60:02d}")
+            if hasattr(self, "run_time_var"):
+                self.run_time_var.set(f"{sec // 60:02d}:{sec % 60:02d}")
             self.current_time.set(time.strftime("%H:%M:%S"))
         self.root.after(500, self._tick)
 
@@ -2051,10 +2173,13 @@ class App:
     def _reset_progress(self) -> None:
         self.cur_section = None
         self.last_elapsed = 0.0
+        self._filter_seen = False
         self._sync_sections()
         self.current_var.set("正在准备…")
         self.current_time.set("")
         self.elapsed_var.set("用时 00:00")
+        if hasattr(self, "run_time_var"):
+            self.run_time_var.set("00:00")
 
     # ==================================================================
     # 任务调度

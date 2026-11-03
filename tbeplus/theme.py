@@ -1,80 +1,81 @@
 """设计令牌：颜色、字体、间距、圆角。
 
-原则：整个界面只从这里取值。
-- 颜色服务于信息识别，不为好看堆渐变色块；
-- 深色只出现在左侧导航，内容区一律浅底白卡，保证长时间阅读不累眼；
-- 字号按"页标题 > 模块标题 > 正文 > 辅助"四档，不再临时定字号。
+Linear-inspired 深色工作台：
+- 页面与面板用相邻灰阶 + 低对比边框分层，不靠阴影和彩色块；
+- 强调色低饱和，只给主操作、当前选中和焦点；
+- 字号按"页标题 > 模块标题 > 正文 > 辅助"分档，不再临时定字号。
 """
 
 from __future__ import annotations
 
 # ---------------------------------------------------------------- 配色
 C = {
-    # 底色：页面浅灰（设计稿 #F5F7FB），卡片纯白
-    "bg": "#F5F7FB",
-    "surface": "#FFFFFF",
-    "surface_alt": "#F8FAFC",     # 表头、代码块这类次级面
-    "surface_hi": "#F1F5F9",      # 输入框、次级按钮
-    "surface_hover": "#E8EEF6",
+    # 底色
+    "bg": "#111318",             # 应用主背景
+    "surface": "#181B22",        # 面板 / 卡片
+    "surface_alt": "#15171D",    # 次级面（表头、计划摘要）
+    "surface_hi": "#232730",     # 输入框 / 次级按钮 / 弱填充
+    "surface_hover": "#292E38",  # 悬停
     "overlay": "#00000000",
 
-    # 线条
-    "stroke": "#E2E8F0",
-    "stroke_hi": "#CBD5E1",
+    # 线条（低对比）
+    "stroke": "#23262E",
+    "stroke_hi": "#333845",
 
     # 文字
-    "text": "#1F2937",
-    "text2": "#64748B",
-    "text3": "#94A3B8",
+    "text": "#E6E8ED",
+    "text2": "#9299A8",
+    "text3": "#6E7482",
 
-    # 主操作色（设计稿：品牌主色 #2864F0）
-    "accent": "#2864F0",
-    "accent_hi": "#1B4FD0",
-    "accent_soft": "#EAF1FE",
-    "accent_line": "#C3D6FB",
+    # 主强调色（低饱和紫）
+    "accent": "#8B83F6",
+    "accent_hi": "#A59EF8",
+    "accent_soft": "#262244",
+    "accent_line": "#3D3670",
 
     # 语义色
-    "ok": "#16A34A",
-    "ok_soft": "#ECFDF3",
-    "ok_line": "#BBF7D0",
-    "warn": "#D97706",
-    "warn_soft": "#FFF7ED",
-    "warn_line": "#FED7AA",
-    "err": "#DC2626",
-    "err_soft": "#FEF2F2",
-    "err_line": "#FECACA",
+    "ok": "#5FC39A",
+    "ok_soft": "#16281F",
+    "ok_line": "#2A4A3A",
+    "warn": "#D2A65C",
+    "warn_soft": "#2A2317",
+    "warn_line": "#4A3B22",
+    "err": "#D97C84",
+    "err_soft": "#2C1A1D",
+    "err_line": "#4A2A2E",
 
-    # 左侧深色导航（设计稿：深海军蓝 #14243A）
-    "nav": "#14243A",
-    "nav_active": "#1E3048",
-    "nav_hover": "#1B2C42",
-    "nav_text": "#E2E8F0",
-    "nav_muted": "#94A3B8",
-    "nav_line": "#24384F",
-    "nav_accent": "#60A5FA",
-    "nav_sel": "#2864F0",          # 选中项：品牌蓝底（设计稿蓝色选中态）
-    "nav_sel_hover": "#3D75F2",    # 选中项悬停：蓝底微亮
+    # 左侧导航
+    "nav": "#101216",
+    "nav_active": "#1E222A",
+    "nav_hover": "#1A1D24",
+    "nav_text": "#E6E8ED",
+    "nav_muted": "#9299A8",
+    "nav_line": "#23262E",
+    "nav_accent": "#8B83F6",
+    "nav_sel": "#1E222A",          # 选中：弱填充，不用整块高饱和
+    "nav_sel_hover": "#232730",
 
-    # 深色导航上的文字/图标
-    "on_dark": "#FFFFFF",         # 导航上的主文字
-    "nav_group": "#6B7F97",       # 导航分组标题
-    "nav_icon": "#7A8CA3",        # 未选中项的图标
+    # 深色底上的文字 / 强调底上的文字
+    "on_dark": "#FFFFFF",
+    "on_accent": "#14151C",
+    "nav_group": "#5E6472",
+    "nav_icon": "#6E7482",
 
-    # 中性色阶（指标卡、未选中胶囊、日志正文）
-    "slate": "#475569",
-    "ink": "#0F172A",             # 按钮按下时的混合基色
+    # 中性色阶
+    "slate": "#B0B6C3",
+    "ink": "#05060A",
 
-    # 语义色的深一档（胶囊文字，保证浅底上的对比度）
-    "ok_deep": "#15803D",
-    "warn_deep": "#B45309",
-    "err_deep": "#B91C1C",
+    # 语义色亮一档（深底上的胶囊文字）
+    "ok_deep": "#8FE0BC",
+    "warn_deep": "#E8C789",
+    "err_deep": "#F0A6AC",
 
-    # 日志控制台：浅灰底，靠文字颜色区分级别
-    "term": "#F8FAFC",
-    "log_text": "#334155",
-    "like": "#2864F0",        # "新点赞"用主色，语义上不是警报
-    "like_hi": "#1B4FD0",
-    "like_soft": "#EAF1FE",
+    # 日志控制台
+    "term": "#15171D",
+    "log_text": "#B9BFCC",
+    "like": "#8B83F6",
+    "like_hi": "#A59EF8",
+    "like_soft": "#262244",
 }
 
 # ---------------------------------------------------------------- 字体
@@ -84,15 +85,7 @@ ICON = "Segoe MDL2 Assets"
 
 
 def f(size: int, bold: bool = False, family: str = UI) -> tuple:
-    """tkinter 字体元组。正数 = 磅，跟随系统 DPI 缩放。
-
-    常用档位（96dpi 下约等于）：
-        20pt ≈ 27px  页面主标题
-        14pt ≈ 19px  模块标题
-        12pt ≈ 16px  卡片标题
-        10pt ≈ 13px  正文
-         9pt ≈ 12px  辅助信息
-    """
+    """tkinter 字体元组。正数 = 磅，跟随系统 DPI 缩放。"""
     return (family, size, "bold") if bold else (family, size)
 
 
@@ -105,14 +98,14 @@ GAP_XS = 4
 GAP_S = 8
 GAP_M = 12
 GAP = 16
-GAP_L = 24
-GAP_XL = 32
+GAP_L = 20
+GAP_XL = 28
 
-RADIUS_WINDOW = 14
-RADIUS_CARD = 16
-RADIUS_CTRL = 10
+RADIUS_WINDOW = 12
+RADIUS_CARD = 10
+RADIUS_CTRL = 6
 RADIUS_CHIP = 999
 
-SIDEBAR_W = 224
+SIDEBAR_W = 220
 NAV_W = 192
-HEADER_H = 80
+HEADER_H = 68

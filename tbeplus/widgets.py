@@ -187,7 +187,7 @@ class Btn(tk.Canvas):
     """
 
     PAIRS = {
-        "primary": (C["accent"], C["accent_hi"], C["on_dark"], C["accent"]),
+        "primary": (C["accent"], C["accent_hi"], C["on_accent"], C["accent"]),
         "secondary": (C["surface"], C["surface_hi"], C["text"], C["stroke_hi"]),
         "ghost": (None, C["surface_hi"], C["text2"], None),
         "danger": (C["surface"], C["err_soft"], C["err"], C["err_line"]),
@@ -384,7 +384,7 @@ class StatCard(tk.Canvas):
         unit: str = "篇",
         note: str = "等待运行",
     ):
-        super().__init__(master, width=10, height=86, bg=C["bg"],
+        super().__init__(master, width=10, height=92, bg=C["bg"],
                          highlightthickness=0, bd=0)
         self._title = title
         self._accent = accent
@@ -473,42 +473,40 @@ class StatCard(tk.Canvas):
         if w <= 4 or h <= 4:
             return
         self.delete("all")
-        border = blend(C["stroke"], self._accent, 0.28 * self._hover_mix)
+        hover = self._hover_mix
+        border = blend(C["stroke"], C["accent"], 0.22 * hover)
+        fill = blend(C["surface"], C["surface_hover"], 0.16 * hover)
         round_rect(self, 1, 1, w - 1, h - 1, T.RADIUS_CARD,
-                   fill=C["surface"], outline=border, width=1)
-        # 左侧 3px 强调条：颜色对应指标语义，不抢文字
-        round_rect(self, 1, 18, 4, h - 18, 1.5,
-                   fill=self._accent, outline="", width=0)
+                   fill=fill, outline=border, width=1)
 
-        self.create_text(20, 24, text=self._glyph, font=T.icon(9),
-                         fill=self._accent, anchor="w")
-        self.create_text(38, 24, text=self._title, font=T.f(10),
-                         fill=C["text2"], anchor="w")
+        # 标题行：语义小圆点 + 小标题 + 右侧辅助说明，不抢数字
+        self.create_oval(19, 20, 25, 26, fill=self._accent, outline="")
+        self.create_text(31, 23, text=self._title, font=T.f(9),
+                         fill=C["text3"], anchor="w")
+        if self._note:
+            title_w = measure(T.f(9), self._title)
+            note_w = measure(T.f(9), self._note)
+            if 31 + title_w + 16 + note_w + 18 <= w:
+                self.create_text(w - 18, 23, text=self._note, font=T.f(9),
+                                 fill=C["text3"], anchor="e")
 
-        num_font = T.f(20, True)
+        # 数字是视觉中心：等宽数字，白字为主，脉冲时轻微偏强调色
+        num_font = T.f(22, True, T.MONO)
         label = f"{self._value:,}"
-        self.create_text(20, 52, text=label, font=num_font,
-                         fill=blend(C["text"], self._accent, self._pulse), anchor="w")
+        num_fill = blend(C["text"], C["accent"], self._pulse * 0.35)
+        self.create_text(18, 38, text=label, font=num_font,
+                         fill=num_fill, anchor="nw")
         nw = measure(num_font, label)
-        x = 24 + nw
-        if self._total is not None:
-            total_font = T.f(9)
-            total_label = f"/ {self._total:,} {self._unit}"
-            self.create_text(x, 56, text=total_label, font=total_font,
-                             fill=C["text3"], anchor="w")
-            if self._total:
-                frac = min(1.0, self._value / self._total)
-                round_rect(self, 20, h - 8, w - 20, h - 4, 2,
-                           fill=C["surface_hi"], outline="", width=0)
-                round_rect(self, 20, h - 8, 20 + (w - 40) * frac, h - 4, 2,
-                           fill=self._accent, outline="", width=0)
-        else:
-            self.create_text(x, 56, text=self._unit, font=T.f(9),
-                             fill=C["text3"], anchor="w")
-        if self._note and (self._total is not None or w >= 190) and w >= 150:
-            note_y = 24 if self._total is not None else 54
-            self.create_text(w - 16, note_y, text=self._note, font=T.f(9),
-                             fill=C["text3"], anchor="e")
+        suffix = (f"/ {self._total:,} {self._unit}"
+                  if self._total is not None else self._unit)
+        self.create_text(24 + nw, 56, text=suffix, font=T.f(9),
+                         fill=C["text3"], anchor="w")
+        if self._total:
+            frac = min(1.0, self._value / self._total)
+            round_rect(self, 18, h - 8, w - 18, h - 5, 1.5,
+                       fill=C["surface_hi"], outline="", width=0)
+            round_rect(self, 18, h - 8, 18 + (w - 36) * frac, h - 5, 1.5,
+                       fill=self._accent, outline="", width=0)
 
 
 # ---------------------------------------------------------------- 进度条
@@ -567,9 +565,13 @@ class Bar(tk.Canvas):
 
 # ---------------------------------------------------------------- 流程步骤
 class Steps(tk.Canvas):
-    """三/四步流程：连接 → 读取 → 点赞。active=蓝，done=绿，error=红。"""
+    """紧凑阶段条：圆点 + 下方标签 + 连接线。
 
-    def __init__(self, master, labels, height: int = 38,
+    状态：idle（未开始）/ active（进行中）/ done（已完成）/ error（失败）。
+    宽度不足时自动隐藏标签，只留圆点与序号，避免挤成一条。
+    """
+
+    def __init__(self, master, labels, height: int = 36,
                  bg: Optional[str] = None):
         super().__init__(master, width=10, height=height,
                          bg=bg or C["surface"], highlightthickness=0, bd=0)
@@ -592,11 +594,14 @@ class Steps(tk.Canvas):
         if w <= 10:
             return
         n = len(self._labels)
+        if n == 0:
+            return
         col = w / n
-        cy = 12
+        cy = 9
+        show_label = col >= 92
         for i, label in enumerate(self._labels):
             state = self._states[i]
-            cx = col * i + 14
+            cx = col * i + 10
             color = {
                 "idle": C["stroke_hi"], "active": C["accent"],
                 "done": C["ok"], "error": C["err"],
@@ -604,25 +609,26 @@ class Steps(tk.Canvas):
             if state == "active":
                 self.create_oval(cx - 8, cy - 8, cx + 8, cy + 8,
                                  fill=C["accent_soft"], outline="")
-            self.create_oval(cx - 6, cy - 6, cx + 6, cy + 6,
+            self.create_oval(cx - 5, cy - 5, cx + 5, cy + 5,
                              fill=color, outline="")
             if state == "done":
                 self.create_text(cx, cy, text="\uE73E", font=T.icon(6),
-                                 fill=C["on_dark"])
+                                 fill=C["on_accent"])
             elif state == "error":
                 self.create_text(cx, cy, text="\uE711", font=T.icon(6),
-                                 fill=C["on_dark"])
+                                 fill=C["on_accent"])
             else:
                 self.create_text(cx, cy, text=str(i + 1), font=T.f(7, True),
-                                 fill=C["on_dark"] if state != "idle" else C["text3"])
-            self.create_text(cx + 12, cy, text=label, font=T.f(9),
-                             fill=C["text"] if state != "idle" else C["text3"],
-                             anchor="w")
+                                 fill=C["on_accent"] if state != "idle" else C["text3"])
             if i < n - 1:
-                x1 = cx + 12 + measure(T.f(9), label) + 8
+                x1 = cx + 8
                 x2 = col * (i + 1) + 2
                 if x2 > x1:
                     self.create_line(x1, cy, x2, cy, fill=C["stroke"], width=1)
+            if show_label:
+                self.create_text(cx + 12, cy + 17, text=label, font=T.f(8),
+                                 fill=C["text2"] if state != "idle" else C["text3"],
+                                 anchor="w")
 
 
 # ---------------------------------------------------------------- 堆叠分布条
@@ -1726,3 +1732,192 @@ def entry(master, textvariable=None, width: int = 12, size: int = 10) -> tk.Entr
 
 def divider(master, pad: int = 0, bg: Optional[str] = None) -> tk.Frame:
     return tk.Frame(master, bg=C["stroke"], height=1)
+
+
+# ---------------------------------------------------------------- 事件列表
+class EventList(tk.Frame):
+    """专业事件列表：时间 / 级别 / 来源 / 事件内容。
+
+    - 级别由内容推导（复用 LogView.classify），来源按事件类别做 UI 侧归组；
+    - 支持 全部 / 成功 / 关键 / 警告 / 错误 五档筛选与关键词搜索；
+    - 空状态紧凑，不占满整块区域。
+    """
+
+    TABS = (62, 116, 176)
+    HEADERS = ("时间", "级别", "来源", "事件内容")
+
+    BADGE = {
+        "INFO": (C["accent_hi"], C["accent_soft"]),
+        " OK ": (C["ok_deep"], C["ok_soft"]),
+        "WARN": (C["warn_deep"], C["warn_soft"]),
+        "ERR ": (C["err_deep"], C["err_soft"]),
+    }
+    HIDE = {
+        "all": set(),
+        "success": {"info", "warn", "err"},
+        "key": {"info"},
+        "warn": {"info", "ok", "err"},
+        "error": {"info", "ok", "warn"},
+    }
+    LEVEL_BUCKET = {"ok": "ok", "like": "ok", "warn": "warn", "err": "err"}
+
+    def __init__(self, master, bg: str = C["term"], size: int = 9,
+                 empty_title: str = "还没有日志",
+                 empty_hint: str = "点上方「开始点赞」或「试运行」"):
+        super().__init__(master, bg=bg, highlightthickness=0, bd=0)
+        self._bg = bg
+        self._rows = 0
+        self._search = ""
+        self._mode = "all"
+        self._autoscroll = True
+        self._has_content = False
+        self.text = tk.Text(
+            self, bg=bg, fg=C["text"], font=(T.MONO, size),
+            relief="flat", bd=0, highlightthickness=0, wrap="none",
+            state="disabled", insertwidth=0, padx=6, pady=6, height=6,
+            spacing1=3, spacing3=3, tabs=self.TABS,
+            selectbackground=C["accent_soft"], selectforeground=C["text"],
+        )
+        self.scroll = SlimScroll(self, self.text, bg=bg)
+        self.text.pack(side=LEFT, fill=BOTH, expand=True)
+        self.scroll.pack(side=RIGHT, fill=Y, padx=(0, 2))
+
+        for name, color in LogView.LEVELS.items():
+            self.text.tag_configure(name, foreground=color)
+        for code, (fg, bgc) in self.BADGE.items():
+            self.text.tag_configure(f"badge-{code.strip()}",
+                                    foreground=fg, background=bgc)
+        for b in ("info", "ok", "warn", "err"):
+            self.text.tag_configure(f"lvl-{b}", elide=False)
+        self.text.tag_configure("src", foreground=C["text3"])
+        self.text.tag_configure("hide", elide=True)
+        self.text.tag_configure("hit", background=C["warn_soft"])
+        self.text.bind("<MouseWheel>", self._wheel)
+
+        self.empty = tk.Frame(self, bg=bg)
+        box = tk.Frame(self.empty, bg=bg)
+        box.place(relx=0.5, rely=0.45, anchor="center")
+        tk.Label(box, text="\uE7C3", font=T.icon(15), fg=C["text3"],
+                 bg=bg).pack()
+        tk.Label(box, text=empty_title, font=T.f(10), fg=C["text2"],
+                 bg=bg).pack(pady=(6, 2))
+        tk.Label(box, text=empty_hint, font=T.f(9), fg=C["text3"],
+                 bg=bg).pack()
+        self.empty.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+    @staticmethod
+    def source_of(line: str) -> str:
+        """UI 侧事件归组，不改变业务语义。"""
+        s = line.strip()
+        if not s:
+            return "系统"
+        if any(k in s for k in ("token", "客户端", "端口", "接管", "登录",
+                                "调试", "连接", "认证")):
+            return "连接"
+        if any(k in s for k in ("板块", "列表", "会话", "筛选", "时间段",
+                                "文章", "篇")):
+            return "资讯"
+        if s.startswith("[") or any(k in s for k in ("点赞", "liked", "digg", "赞")):
+            return "点赞"
+        return "系统"
+
+    def append(self, line: str, stamp: Optional[str] = None) -> None:
+        import time as _time
+
+        level, group = LogView.classify(line)
+        code = LogView.CODES.get(level, "INFO")
+        bucket = self.LEVEL_BUCKET.get(level, "info")
+        at_bottom = self.text.yview()[1] >= 0.999
+        now = stamp or _time.strftime("%H:%M:%S")
+        self._rows += 1
+        row = f"row{self._rows}"
+        tags = (group, row, f"lvl-{bucket}")
+        # 单行事件内容过长时截断，避免撑出横向裁切（完整内容仍可通过筛选/复制查看）
+        content = line if len(line) <= 150 else line[:149] + "…"
+        self.text.configure(state="normal")
+        self.text.insert("end", f"{now}\t", ("src",) + tags)
+        self.text.insert("end", f" {code.strip()} \t",
+                         (f"badge-{code.strip()}",) + tags)
+        self.text.insert("end", f"{self.source_of(line)}\t", ("src",) + tags)
+        self.text.insert("end", f"{content}\n",
+                         (level if group == "quiet" else "text2",) + tags)
+        # 与旧 LogView 一致：超过 3000 行裁掉最旧的 800 行，避免长任务无限增长
+        line_count = int(self.text.index("end-1c").split(".")[0])
+        if line_count > 3000:
+            self.text.delete("1.0", "800.0")
+        if self._search:
+            self._apply_search_row(row, line)
+        self.text.configure(state="disabled")
+        if at_bottom and self._autoscroll:
+            self.text.see("end")
+        if not self._has_content:
+            self._has_content = True
+            self.empty.place_forget()
+
+    def _apply_search_row(self, row: str, line: str) -> None:
+        ranges = self.text.tag_ranges(row)
+        if not ranges:
+            return
+        start, end = str(ranges[0]), str(ranges[1])
+        try:
+            self.text.tag_remove("hide", start, end)
+            self.text.tag_remove("hit", start, end)
+            if self._search and self._search in line.lower():
+                self.text.tag_add("hit", start, end)
+            elif self._search:
+                self.text.tag_add("hide", start, f"{end}+1c")
+        except tk.TclError:
+            pass
+
+    def set_search(self, query: str) -> None:
+        self._search = (query or "").strip().lower()
+        for i in range(1, self._rows + 1):
+            row = f"row{i}"
+            ranges = self.text.tag_ranges(row)
+            if ranges:
+                line = self.text.get(str(ranges[0]), str(ranges[1]))
+                self._apply_search_row(row, line)
+        if not self._search:
+            self.text.tag_remove("hide", "1.0", "end")
+            self.text.tag_remove("hit", "1.0", "end")
+
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode if mode in self.HIDE else "all"
+        hidden = self.HIDE[self._mode]
+        for b in ("info", "ok", "warn", "err"):
+            self.text.tag_configure(f"lvl-{b}", elide=b in hidden)
+
+    def set_autoscroll(self, on: bool) -> None:
+        self._autoscroll = bool(on)
+        if self._autoscroll:
+            self.text.see("end")
+
+    def clear(self) -> None:
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.configure(state="disabled")
+        self._rows = 0
+        self._has_content = False
+        self.empty.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+    def dump(self) -> str:
+        return self.text.get("1.0", "end-1c")
+
+    def copy_visible(self) -> str:
+        hidden = self.HIDE.get(self._mode, set())
+        out = []
+        total = int(self.text.index("end-1c").split(".")[0])
+        for i in range(1, total + 1):
+            tags = self.text.tag_names(f"{i}.0")
+            if "hide" in tags:
+                continue
+            bucket = next((t[4:] for t in tags if t.startswith("lvl-")), "info")
+            if bucket in hidden:
+                continue
+            line = self.text.get(f"{i}.0", f"{i}.end")
+            out.append(line)
+        return "\n".join(out)
+
+    def _wheel(self, e) -> str:
+        self.text.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        return "break"
